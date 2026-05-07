@@ -1,22 +1,22 @@
 # NextStep AI Job Matching Server
 
-AI server cho he thong NextStep, phu trach crawl job, trich xuat CV, so sanh CV voi job, phan tich skill gap, tao roadmap hoc tap va dua ra nhan xet bang AI.
+AI server cho hệ thống NextStep, phụ trách crawl job, trích xuất CV, so sánh CV với job, phân tích skill gap, tạo roadmap học tập và đưa ra nhận xét bằng AI.
 
-## Tinh Nang Noi Bat
+## Tính Năng Nổi Bật
 
-- **Crawl job tu TopDev**: lay title, cong ty, dia diem, muc luong, level, kinh nghiem, deadline, mo ta job va danh sach skill.
-- **Lam sach du lieu job**: tach HTML/script/entity, chuan hoa khoang trang, luu ca `description_raw` va `description_clean`.
-- **Chuan hoa skill va alias**: nhan dien cac cach viet tat/ten goi tuong duong nhu `TS -> TypeScript`, `JS -> JavaScript`, `k8s -> Kubernetes`, `postgres -> PostgreSQL`, `asp.net -> .NET`.
-- **Loc role label khong phai skill**: cac cum nhu `Full-Stack`, `Backend`, `Frontend`, `Developer`, `Engineer` khong bi dua vao skill gap/roadmap.
-- **Phan tich CV**: doc CV tu text hoac file PDF/DOCX/TXT, trich xuat level, so nam kinh nghiem, dia diem, chung chi va skill.
-- **So sanh CV voi job**: tinh diem match, skill match, keyword match, title/level match va ATS readability.
-- **Gap analysis**: phan loai skill thieu, skill yeu, gap ve kinh nghiem, level va chung chi.
-- **Roadmap hoc tap**: tao cac phase hoc tap, uoc tinh so tuan, muc do kho, thoi gian hoan thanh va tai nguyen hoc.
-- **AI review**: dung Gemini de nhan xet CV voi job, dua ra diem manh, rui ro, goi y cai thien va verdict. Neu AI loi, server tra fallback review dua tren score/gap/roadmap.
-- **Luu lich su phan tich**: luu ket qua vao `cv_analysis_results`, `cv_skills`, `skill_gaps` de xem lai.
-- **Embedding job**: dong bo embedding cho job de phuc vu tim kiem/goi y ve sau.
+- **Crawl job từ TopDev**: lấy title, công ty, địa điểm, mức lương, level, kinh nghiệm, deadline, mô tả job và danh sách skill.
+- **Làm sạch dữ liệu job**: tách HTML/script/entity, chuẩn hóa khoảng trắng, lưu cả `description_raw` và `description_clean`.
+- **Chuẩn hóa skill và alias**: nhận diện các cách viết tắt/tên gọi tương đương như `TS -> TypeScript`, `JS -> JavaScript`, `k8s -> Kubernetes`, `postgres -> PostgreSQL`, `asp.net -> .NET`.
+- **Lọc role label không phải skill**: các cụm như `Full-Stack`, `Backend`, `Frontend`, `Developer`, `Engineer` không bị đưa vào skill gap/roadmap.
+- **Phân tích CV**: đọc CV từ text hoặc file PDF/DOCX/TXT, trích xuất level, số năm kinh nghiệm, địa điểm, chứng chỉ và skill.
+- **So sánh CV với job**: tính điểm match, skill match, keyword match, title/level match và ATS readability.
+- **Gap analysis**: phân loại skill thiếu, skill yếu, gap về kinh nghiệm, level và chứng chỉ.
+- **Roadmap học tập**: tạo các phase học tập, ước tính số tuần, mức độ khó, thời gian hoàn thành và tài nguyên học.
+- **AI review**: dùng Gemini để nhận xét CV với job, đưa ra điểm mạnh, rủi ro, gợi ý cải thiện và verdict. Nếu AI lỗi, server trả fallback review dựa trên score/gap/roadmap.
+- **Lưu lịch sử phân tích**: lưu kết quả vào `cv_analysis_results`, `cv_skills`, `skill_gaps` để xem lại.
+- **Embedding job**: đồng bộ embedding cho job để phục vụ tìm kiếm/gợi ý về sau.
 
-## Cong Nghe Su Dung
+## Công Nghệ Sử Dụng
 
 - FastAPI
 - SQLAlchemy + Alembic
@@ -26,13 +26,13 @@ AI server cho he thong NextStep, phu trach crawl job, trich xuat CV, so sanh CV 
 - BeautifulSoup + Selenium cho crawler
 - pgvector cho embedding
 
-## Cau Truc Chinh
+## Cấu Trúc Chính
 
 ```text
 ai_job_server/
   app/
     api/v1/endpoints/      # REST API endpoints
-    services/              # Xu ly AI, crawl, matching, roadmap
+    services/              # Xử lý AI, crawl, matching, roadmap
     models/                # SQLAlchemy models
     schemas/               # Pydantic schemas
     data/                  # Baseline data, skill relation groups
@@ -42,30 +42,30 @@ ai_job_server/
   README.md
 ```
 
-## Cai Dat
+## Cài Đặt
 
-### 1. Tao va kich hoat virtual environment
+### 1. Tạo và kích hoạt virtual environment
 
 ```powershell
 python -m venv venv
 .\venv\Scripts\Activate.ps1
 ```
 
-### 2. Cai dependencies
+### 2. Cài dependencies
 
 ```powershell
 pip install -r requirements.txt
 ```
 
-`python-multipart` bat buoc neu dung endpoint upload file CV `/api/v1/cv/ingest-file`.
+`python-multipart` bắt buộc nếu dùng endpoint upload file CV `/api/v1/cv/ingest-file`.
 
-### 3. Tao file moi truong
+### 3. Tạo file môi trường
 
 ```powershell
 Copy-Item .env.example .env
 ```
 
-Dien cac bien quan trong trong `.env`:
+Điền các biến quan trọng trong `.env`:
 
 ```env
 DATABASE_URL=postgresql://postgres.<project-ref>:<password>@aws-1-ap-northeast-1.pooler.supabase.com:6543/postgres?sslmode=require
@@ -75,7 +75,7 @@ JWT_ACCESS_SECRET=replace_me_access_secret
 JWT_ACCESS_EXPIRES_IN=1h
 ```
 
-Neu dung Supabase, nen dung pooler host/port:
+Nếu dùng Supabase, nên dùng pooler host/port:
 
 ```env
 DB_HOST=aws-1-ap-northeast-1.pooler.supabase.com
@@ -83,39 +83,39 @@ DB_PORT=6543
 DB_NAME=postgres
 ```
 
-### 4. Chay migration
+### 4. Chạy migration
 
 ```powershell
 alembic upgrade head
 ```
 
-Server cung co co che tao bo sung mot so bang/cot can thiet khi chay, nhung nen chay migration de DB dong bo ro rang.
+Server cũng có cơ chế tạo bổ sung một số bảng/cột cần thiết khi chạy, nhưng nên chạy migration để DB đồng bộ rõ ràng.
 
-## Chay Server
+## Chạy Server
 
 ```powershell
 uvicorn app.main:app --reload --port 9001
 ```
 
-Mo Swagger UI:
+Mở Swagger UI:
 
 ```text
 http://127.0.0.1:9001/docs
 ```
 
-## Huong Dan Su Dung API
+## Hướng Dẫn Sử Dụng API
 
 ### 1. Crawl job TopDev
 
 Swagger group: **Jobs**
 
 - `POST /api/v1/jobs/crawl`: crawl 1 job URL.
-- `POST /api/v1/jobs/crawl-batch`: crawl nhieu job URL.
-- `GET /api/v1/jobs/`: xem danh sach job da crawl.
-- `GET /api/v1/jobs/{job_id}`: xem chi tiet job.
-- `GET /api/v1/jobs/{job_id}/skills`: xem skill cua job.
+- `POST /api/v1/jobs/crawl-batch`: crawl nhiều job URL.
+- `GET /api/v1/jobs/`: xem danh sách job đã crawl.
+- `GET /api/v1/jobs/{job_id}`: xem chi tiết job.
+- `GET /api/v1/jobs/{job_id}/skills`: xem skill của job.
 
-Vi du crawl batch:
+Ví dụ crawl batch:
 
 ```json
 {
@@ -125,7 +125,7 @@ Vi du crawl batch:
 }
 ```
 
-### 2. So sanh CV voi job bang text
+### 2. So sánh CV với job bằng text
 
 Swagger group: **CV**
 
@@ -146,16 +146,16 @@ Body:
 }
 ```
 
-Ket qua tra ve gom:
+Kết quả trả về gồm:
 
-- `extracted_profile`: ho so CV da trich xuat.
-- `job_context`: thong tin job.
-- `job_match`: diem match va skill match/missing.
-- `gap_analysis`: skill thieu, skill yeu, gap level/experience.
-- `roadmap`: lo trinh hoc tap va thoi gian uoc tinh.
-- `ai_review`: nhan xet AI/fallback ve CV voi job.
+- `extracted_profile`: hồ sơ CV đã trích xuất.
+- `job_context`: thông tin job.
+- `job_match`: điểm match và skill match/missing.
+- `gap_analysis`: skill thiếu, skill yếu, gap level/experience.
+- `roadmap`: lộ trình học tập và thời gian ước tính.
+- `ai_review`: nhận xét AI/fallback về CV với job.
 
-### 3. So sanh CV voi job bang file PDF/DOCX/TXT
+### 3. So sánh CV với job bằng file PDF/DOCX/TXT
 
 Swagger group: **CV**
 
@@ -168,146 +168,146 @@ POST /api/v1/cv/ingest-file
 Form data:
 
 - `cv_file`: file CV PDF/DOCX/TXT.
-- `job_id`: id cua job da crawl.
-- `job_url`: co the de trong neu da co `job_id`.
-- `timeframe_weeks`: `0` neu khong gioi han thoi gian.
-- `max_skills_per_phase`: 1 den 5.
+- `job_id`: id của job đã crawl.
+- `job_url`: có thể để trống nếu đã có `job_id`.
+- `timeframe_weeks`: `0` nếu không giới hạn thời gian.
+- `max_skills_per_phase`: 1 đến 5.
 
-### 4. Xem lai lich su phan tich
+### 4. Xem lại lịch sử phân tích
 
-- `GET /api/v1/cv/analysis-results`: danh sach analysis da luu.
-- `GET /api/v1/cv/analysis-results/{analysis_id}`: xem lai ket qua day du, gom ca `ai_review`.
+- `GET /api/v1/cv/analysis-results`: danh sách analysis đã lưu.
+- `GET /api/v1/cv/analysis-results/{analysis_id}`: xem lại kết quả đầy đủ, gồm cả `ai_review`.
 
-### 5. API tinh rieng tung phan
+### 5. API tính riêng từng phần
 
 Swagger group: **Analyzer**
 
-- `POST /api/v1/analyzer/job-match`: chi tinh diem match.
-- `POST /api/v1/analyzer/gap-analysis`: chi tinh gap analysis.
+- `POST /api/v1/analyzer/job-match`: chỉ tính điểm match.
+- `POST /api/v1/analyzer/gap-analysis`: chỉ tính gap analysis.
 
 Swagger group: **Roadmap**
 
-- `POST /api/v1/roadmap/generate`: tao roadmap tu danh sach missing/weak skills.
+- `POST /api/v1/roadmap/generate`: tạo roadmap từ danh sách missing/weak skills.
 
-## Scripts Quan Trong
+## Scripts Quan Trọng
 
-### Seed skill aliases, skill nen tang va course baseline
+### Seed skill aliases, skill nền tảng và course baseline
 
 ```powershell
 python -B scripts\seed_skill_foundation.py
 ```
 
-Script nay them/cap nhat aliases nhu `ts`, `js`, `k8s`, `postgres`, `mssql`, dong bo importance tier va course duration.
+Script này thêm/cập nhật aliases như `ts`, `js`, `k8s`, `postgres`, `mssql`, đồng bộ importance tier và course duration.
 
-### Kiem tra pipeline skill
+### Kiểm tra pipeline skill
 
 ```powershell
 python -B scripts\validate_skill_pipeline.py
 ```
 
-Kiem tra alias mapping, relation groups va course duration.
+Kiểm tra alias mapping, relation groups và course duration.
 
-### Don role label khong phai skill
+### Dọn role label không phải skill
 
 ```powershell
 python -B scripts\cleanup_non_skill_role_labels.py
 ```
 
-Dung khi DB cu da co cac skill sai nhu `Full-Stack`, `Backend`, `Frontend`. Script se xoa lien ket trong `job_skills` va deactivate skill label do.
+Dùng khi DB cũ đã có các skill sai như `Full-Stack`, `Backend`, `Frontend`. Script sẽ xóa liên kết trong `job_skills` và deactivate skill label đó.
 
-### Lam sach lai job description cu
+### Làm sạch lại job description cũ
 
 ```powershell
 python -B scripts\backfill_clean_job_descriptions.py
 ```
 
-Cap nhat lai `description_clean` cho cac job da crawl truoc khi co logic clean moi.
+Cập nhật lại `description_clean` cho các job đã crawl trước khi có logic clean mới.
 
-### Crawl job mau
+### Crawl job mẫu
 
 ```powershell
 python scripts\run_crawl.py
 ```
 
-Sua URL trong script truoc khi chay neu can crawl job khac.
+Sửa URL trong script trước khi chạy nếu cần crawl job khác.
 
-### Dong bo embedding cho job
+### Đồng bộ embedding cho job
 
 ```powershell
 python -c "from app.db.session import get_standalone_db; from app.services.embedding_service import EmbeddingService; db=get_standalone_db(); print(EmbeddingService.sync_job_embeddings(db, limit=10, only_missing=True)); db.close()"
 ```
 
-## Du Lieu Chinh Trong DB
+## Dữ Liệu Chính Trong DB
 
-- `jobs`: job da crawl.
-- `companies`: cong ty.
-- `skills`: skill canonical va aliases.
-- `job_skills`: skill yeu cau cua job.
-- `skill_courses`: tai nguyen hoc va duration.
-- `cv_analysis_results`: ket qua phan tich CV-job.
-- `cv_skills`: skill trich tu CV.
-- `skill_gaps`: gap da luu theo analysis.
+- `jobs`: job đã crawl.
+- `companies`: công ty.
+- `skills`: skill canonical và aliases.
+- `job_skills`: skill yêu cầu của job.
+- `skill_courses`: tài nguyên học và duration.
+- `cv_analysis_results`: kết quả phân tích CV-job.
+- `cv_skills`: skill trích từ CV.
+- `skill_gaps`: gap đã lưu theo analysis.
 - `entity_embeddings`: vector embedding.
 
-## Loi Thuong Gap
+## Lỗi Thường Gặp
 
-### 1. Khong ket noi duoc Supabase
+### 1. Không kết nối được Supabase
 
-Loi mau:
+Lỗi mẫu:
 
 ```text
 could not translate host name "aws-1-ap-northeast-1.pooler.supabase.com" to address
 ```
 
-Kiem tra DNS:
+Kiểm tra DNS:
 
 ```powershell
 nslookup aws-1-ap-northeast-1.pooler.supabase.com
 ```
 
-Kiem tra Python resolve host:
+Kiểm tra Python resolve host:
 
 ```powershell
 python -c "import socket; print(socket.getaddrinfo('aws-1-ap-northeast-1.pooler.supabase.com', 5432))"
 ```
 
-Neu DNS da on, restart server FastAPI.
+Nếu DNS đã ổn, restart server FastAPI.
 
-### 2. Upload CV bi loi multipart
+### 2. Upload CV bị lỗi multipart
 
 ```text
 Form data requires "python-multipart" to be installed
 ```
 
-Chay:
+Chạy:
 
 ```powershell
 pip install -r requirements.txt
 ```
 
-### 3. AI review tra `source: fallback`
+### 3. AI review trả `source: fallback`
 
-Nghia la Gemini khong chay duoc hoac bi tat, server da tao nhan xet fallback tu score/gap/roadmap.
+Nghĩa là Gemini không chạy được hoặc bị tắt, server đã tạo nhận xét fallback từ score/gap/roadmap.
 
-Kiem tra:
+Kiểm tra:
 
 ```env
 GEMINI_API_KEY=...
 CV_AI_ENRICHMENT_ENABLED=True
 ```
 
-### 4. Job van hien `Full-Stack` nhu skill
+### 4. Job vẫn hiện `Full-Stack` như skill
 
-Chay:
+Chạy:
 
 ```powershell
 python -B scripts\cleanup_non_skill_role_labels.py
 ```
 
-Sau do phan tich lai CV-job. Ket qua analysis cu se khong tu cap nhat.
+Sau đó phân tích lại CV-job. Kết quả analysis cũ sẽ không tự cập nhật.
 
-## Ghi Chu
+## Ghi Chú
 
-- AI server doc `.env` trong thu muc `ai_job_server`.
-- Cac script ghi truc tiep vao database qua `DATABASE_URL`.
-- Khi thay doi aliases, cleanup hoac migration, nen restart server de dam bao code va DB cung trang thai.
+- AI server đọc `.env` trong thư mục `ai_job_server`.
+- Các script ghi trực tiếp vào database qua `DATABASE_URL`.
+- Khi thay đổi aliases, cleanup hoặc migration, nên restart server để đảm bảo code và DB cùng trạng thái.
