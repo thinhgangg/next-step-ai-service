@@ -5,6 +5,7 @@ from typing import Dict, List, Set
 import re
 
 from app.schemas.analyzer import JobMatchRequest, JobMatchResponse, ScoreBreakdown
+from app.services.skill_normalization import canonicalize_skill_key, is_non_skill_role_label
 
 
 LEVEL_MAP: Dict[str, int] = {
@@ -41,7 +42,7 @@ class JobMatchingService:
 
     @staticmethod
     def _normalize_skill_name(value: str) -> str:
-        return value.strip().lower()
+        return canonicalize_skill_key(value)
 
     @staticmethod
     def _tokenize(value: str) -> Set[str]:
@@ -65,7 +66,7 @@ class JobMatchingService:
         cv_skill_keys = [
             JobMatchingService._normalize_skill_name(skill.name)
             for skill in payload.cv_skills
-            if skill.name
+            if skill.name and not is_non_skill_role_label(skill.name)
         ]
 
         if not cv_skill_keys:
@@ -75,6 +76,8 @@ class JobMatchingService:
         weight_total = 0.0
 
         for required in payload.job_skills:
+            if is_non_skill_role_label(required.name):
+                continue
             skill_key = JobMatchingService._normalize_skill_name(required.name)
             weight = JobMatchingService._normalize_importance(required.importance)
 
@@ -108,12 +111,16 @@ class JobMatchingService:
         if not payload.job_skills:
             return 0.0
 
-        cv_items = [skill for skill in payload.cv_skills if skill.name]
+        cv_items = [skill for skill in payload.cv_skills if skill.name and not is_non_skill_role_label(skill.name)]
         if not cv_items:
             return 0.0
 
         total = 0.0
+        job_skill_count = 0
         for required in payload.job_skills:
+            if is_non_skill_role_label(required.name):
+                continue
+            job_skill_count += 1
             req_name = JobMatchingService._normalize_skill_name(required.name)
             required_tokens = JobMatchingService._tokenize(req_name)
 
@@ -132,7 +139,10 @@ class JobMatchingService:
 
             total += best
 
-        return total / len(payload.job_skills)
+        if job_skill_count == 0:
+            return 0.0
+
+        return total / job_skill_count
 
     @staticmethod
     def calculate_title_match(payload: JobMatchRequest) -> float:
@@ -173,14 +183,26 @@ class JobMatchingService:
         cv_skill_keys: Set[str] = {
             JobMatchingService._normalize_skill_name(skill.name)
             for skill in payload.cv_skills
-        }
-        job_skill_keys: Set[str] = {
-            JobMatchingService._normalize_skill_name(skill.name)
-            for skill in payload.job_skills
+            if JobMatchingService._normalize_skill_name(skill.name) and not is_non_skill_role_label(skill.name)
         }
 
-        matched = sorted(job_skill_keys.intersection(cv_skill_keys))
-        missing = sorted(job_skill_keys.difference(cv_skill_keys))
+        matched: list[str] = []
+        missing: list[str] = []
+        seen: set[str] = set()
+        for skill in payload.job_skills:
+            if is_non_skill_role_label(skill.name):
+                continue
+            key = JobMatchingService._normalize_skill_name(skill.name)
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            if key in cv_skill_keys:
+                matched.append(skill.name)
+            else:
+                missing.append(skill.name)
+
+        matched.sort(key=str.lower)
+        missing.sort(key=str.lower)
         return matched, missing
 
     @staticmethod

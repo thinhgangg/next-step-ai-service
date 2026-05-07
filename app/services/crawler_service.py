@@ -26,6 +26,7 @@ from app.models.company import Company
 from app.models.job import Currency, Job, JobLevel, JobStatus
 from app.models.job_skill import JobSkill
 from app.models.skill import Skill
+from app.services.skill_normalization import is_non_skill_role_label
 
 
 class JobCrawler:
@@ -155,8 +156,36 @@ class JobCrawler:
 
     @staticmethod
     def _clean_lines(text: str) -> str:
-        lines = [line.strip() for line in text.splitlines() if line.strip()]
-        return "\n".join(lines)
+        if not text:
+            return ""
+
+        text = unescape(str(text)).replace("\xa0", " ")
+        if re.search(r"</?[a-z][\s\S]*>", text, re.I):
+            soup = BeautifulSoup(text, "html.parser")
+            for noisy_node in soup(["script", "style", "noscript", "svg"]):
+                noisy_node.decompose()
+            text = soup.get_text("\n", strip=True)
+
+        text = text.replace("\r\n", "\n").replace("\r", "\n")
+        text = re.sub(r"[\u200b-\u200f\ufeff]", "", text)
+        text = re.sub(r"[ \t]+", " ", text)
+
+        lines: list[str] = []
+        previous = ""
+        for raw_line in text.splitlines():
+            line = raw_line.strip()
+            if not line:
+                if lines and lines[-1] != "":
+                    lines.append("")
+                continue
+            if line == previous:
+                continue
+            lines.append(line)
+            previous = line
+
+        cleaned = "\n".join(lines).strip()
+        cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
+        return cleaned
 
     @staticmethod
     def _normalize_section_heading(text: str) -> str:
@@ -168,10 +197,7 @@ class JobCrawler:
 
     @staticmethod
     def _clean_section_text(text: str) -> str:
-        cleaned = BeautifulSoup(text or "", "html.parser").get_text("\n", strip=True)
-        cleaned = cleaned.replace("\xa0", " ")
-        cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
-        return cleaned.strip()
+        return JobCrawler._clean_lines(text)
 
     @staticmethod
     def _normalize_inline_text(text: str) -> str:
@@ -490,6 +516,9 @@ class JobCrawler:
             "spring boot": "Spring Boot",
             "dotnet": ".NET",
             ".net": ".NET",
+            ".net core": ".NET",
+            "net core": ".NET",
+            "asp.net": ".NET",
             "c sharp": "C#",
             "c#": "C#",
             "golang": "Go",
@@ -942,6 +971,8 @@ class JobCrawler:
             key = cleaned.lower().strip()
             if key in ignored:
                 continue
+            if is_non_skill_role_label(cleaned):
+                continue
             if len(cleaned) <= 1:
                 continue
             normalized.append(cleaned)
@@ -1036,6 +1067,8 @@ class JobCrawler:
         for skill in merged_skills:
             normalized = self._normalize_skill_name(skill)
             if not normalized:
+                continue
+            if is_non_skill_role_label(normalized):
                 continue
             if len(normalized) > 50:
                 continue
@@ -1421,6 +1454,8 @@ class JobCrawler:
                         skill_name = str(detail.get("skill", "")).strip()
                         if not skill_name:
                             continue
+                        if is_non_skill_role_label(skill_name):
+                            continue
                         key = skill_name.lower()
                         if key in seen_keys:
                             continue
@@ -1472,6 +1507,8 @@ class JobCrawler:
                     deduped: list[str] = []
                     seen: set[str] = set()
                     for skill_name in skill_names:
+                        if is_non_skill_role_label(skill_name):
+                            continue
                         key = skill_name.lower()
                         if key in seen:
                             continue

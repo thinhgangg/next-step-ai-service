@@ -13,6 +13,7 @@ from app.schemas.analyzer import (
     WeakSkillGap,
 )
 from app.services.job_matching_service import LEVEL_MAP
+from app.services.skill_normalization import canonicalize_skill_key, is_non_skill_role_label
 
 
 class AnalysisService:
@@ -32,7 +33,7 @@ class AnalysisService:
 
     @staticmethod
     def normalize_skill_name(value: str) -> str:
-        return value.strip().lower()
+        return canonicalize_skill_key(value)
 
     @staticmethod
     def _importance_label(importance: float) -> str:
@@ -48,6 +49,7 @@ class AnalysisService:
         return {
             AnalysisService.normalize_skill_name(skill.name): skill
             for skill in payload.job_skills
+            if not is_non_skill_role_label(skill.name)
         }
 
     @staticmethod
@@ -55,6 +57,7 @@ class AnalysisService:
         cv_skill_map = {
             AnalysisService.normalize_skill_name(skill.name): skill
             for skill in payload.cv_skills
+            if not is_non_skill_role_label(skill.name)
         }
         job_skill_map = AnalysisService._build_job_skill_map(payload)
 

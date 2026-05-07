@@ -114,3 +114,80 @@ class AIService:
 		except Exception as exc:
 			print(f"--- CV AI ENRICHMENT ERROR: {exc} ---")
 			return None
+
+	@staticmethod
+	def generate_cv_job_review(
+		cv_text: str,
+		extracted_profile: dict[str, Any],
+		job_context: dict[str, Any],
+		job_match: dict[str, Any],
+		gap_analysis: dict[str, Any],
+		roadmap: dict[str, Any],
+	) -> dict[str, Any] | None:
+		if not settings.CV_AI_ENRICHMENT_ENABLED:
+			return None
+
+		if not settings.GEMINI_API_KEY:
+			return None
+
+		limited_cv = (cv_text or "").strip()[:5000]
+		payload = {
+			"extracted_profile": extracted_profile,
+			"job_context": job_context,
+			"job_match": job_match,
+			"gap_analysis": gap_analysis,
+			"roadmap": roadmap,
+		}
+
+		prompt = (
+			"Bạn là chuyên gia tuyển dụng IT và cố vấn phát triển nghề nghiệp. "
+			"Hãy nhận xét mức độ phù hợp của CV với job dựa trên dữ liệu đã tính toán sẵn. "
+			"Chỉ trả về JSON hợp lệ, không markdown, không thêm văn bản ngoài JSON.\n"
+			"Schema JSON:\n"
+			"{\n"
+			'  "summary": string,\n'
+			'  "strengths": [string],\n'
+			'  "concerns": [string],\n'
+			'  "recommendations": [string],\n'
+			'  "verdict": "strong_match|potential_match|weak_match"\n'
+			"}\n"
+			"Yêu cầu:\n"
+			"- Viết tiếng Việt, ngắn gọn, thực tế, không tâng bốc quá mức.\n"
+			"- Không bịa kỹ năng hoặc kinh nghiệm ngoài dữ liệu.\n"
+			"- Nhận xét nên liên hệ score, missing/weak skills, roadmap và thời gian học.\n"
+			"- strengths, concerns, recommendations mỗi danh sách tối đa 4 ý.\n\n"
+			f"Dữ liệu phân tích:\n{json.dumps(payload, ensure_ascii=False)[:12000]}\n\n"
+			f"CV excerpt:\n{limited_cv}"
+		)
+
+		try:
+			client = AIService._build_client()
+			response = client.models.generate_content(
+				model="gemini-1.5-flash",
+				contents=prompt,
+			)
+			text = (response.text or "").strip() if response else ""
+			data = AIService._extract_json(text)
+			if not data:
+				return None
+
+			def clean_list(value: Any) -> list[str]:
+				if not isinstance(value, list):
+					return []
+				return [str(item).strip() for item in value[:4] if str(item).strip()]
+
+			verdict = str(data.get("verdict") or "").strip()
+			if verdict not in {"strong_match", "potential_match", "weak_match"}:
+				verdict = "potential_match"
+
+			return {
+				"summary": str(data.get("summary") or "").strip()[:800],
+				"strengths": clean_list(data.get("strengths")),
+				"concerns": clean_list(data.get("concerns")),
+				"recommendations": clean_list(data.get("recommendations")),
+				"verdict": verdict,
+				"source": "ai",
+			}
+		except Exception as exc:
+			print(f"--- CV JOB AI REVIEW ERROR: {exc} ---")
+			return None

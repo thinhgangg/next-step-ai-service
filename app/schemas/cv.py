@@ -42,6 +42,15 @@ class JobContext(BaseModel):
 	job_skills: List[JobSkillInput] = Field(default_factory=list)
 
 
+class AiCvReview(BaseModel):
+	summary: str
+	strengths: List[str] = Field(default_factory=list)
+	concerns: List[str] = Field(default_factory=list)
+	recommendations: List[str] = Field(default_factory=list)
+	verdict: str
+	source: str = "ai"
+
+
 class CvIngestResponse(BaseModel):
 	analysis_result_id: Optional[int] = None
 	extracted_profile: ExtractedCvProfile
@@ -49,6 +58,7 @@ class CvIngestResponse(BaseModel):
 	job_match: JobMatchResponse
 	gap_analysis: GapAnalysisResponse
 	roadmap: RoadmapGenerateResponse
+	ai_review: Optional[AiCvReview] = None
 
 
 class AnalysisHistoryItem(BaseModel):

@@ -41,8 +41,14 @@ def check_alias_matching() -> None:
             "c++": "C++",
             "cpp": "C++",
             "node js": "Node.js",
-            "rest api": "Restful Api",
+            "rest api": "REST API",
             "react js": "React",
+            "ts": "TypeScript",
+            "k8s": "Kubernetes",
+            "postgres": "PostgreSQL",
+            "mariadb": "MySQL",
+            "mongo": "MongoDB",
+            "mssql": "MS SQL",
         }
 
         index = {}

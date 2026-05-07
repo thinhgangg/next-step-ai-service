@@ -14,6 +14,7 @@ from app.models.skill import Skill
 from app.schemas.analyzer import CvSkillInput, JobSkillInput
 from app.schemas.cv import ExtractedCvProfile, JobContext
 from app.services.ai_service import AIService
+from app.services.skill_normalization import canonicalize_skill_key, get_skill_aliases, is_non_skill_role_label, normalize_skill_key
 
 
 class CvIngestService:
@@ -188,10 +189,55 @@ class CvIngestService:
 
 	@staticmethod
 	def _collect_skill_candidates(db: Session) -> list[str]:
-		skill_names = [item.name for item in db.query(Skill).all() if item.name]
+		skill_names = [
+			item.name
+			for item in db.query(Skill).all()
+			if item.name and not is_non_skill_role_label(item.name)
+		]
 		if skill_names:
 			return skill_names
 		return CvIngestService._fallback_skills
+
+	@staticmethod
+	def _collect_skill_alias_lookup(db: Session, skill_candidates: list[str]) -> dict[str, str]:
+		lookup: dict[str, str] = {}
+
+		for skill in db.query(Skill).all():
+			if not skill.name:
+				continue
+			if is_non_skill_role_label(skill.name):
+				continue
+
+			canonical_name = skill.name
+			keys = [skill.name, *(skill.aliases or []), *get_skill_aliases(skill.name)]
+			for value in keys:
+				key = normalize_skill_key(value)
+				if key:
+					lookup.setdefault(key, canonical_name)
+				canonical_key = canonicalize_skill_key(value)
+				if canonical_key:
+					lookup.setdefault(canonical_key, canonical_name)
+
+		if lookup:
+			return lookup
+
+		for name in skill_candidates:
+			key = normalize_skill_key(name)
+			if key:
+				lookup.setdefault(key, name)
+			canonical_key = canonicalize_skill_key(name)
+			if canonical_key:
+				lookup.setdefault(canonical_key, name)
+
+			for alias in get_skill_aliases(name):
+				alias_key = normalize_skill_key(alias)
+				if alias_key:
+					lookup.setdefault(alias_key, name)
+				canonical_alias_key = canonicalize_skill_key(alias)
+				if canonical_alias_key:
+					lookup.setdefault(canonical_alias_key, name)
+
+		return lookup
 
 	@staticmethod
 	def _merge_unique_strings(left: list[str], right: list[str]) -> list[str]:
@@ -222,9 +268,9 @@ class CvIngestService:
 		skill_candidates: list[str],
 		experience_years: float,
 	) -> list[CvSkillInput]:
-		candidate_map = {name.lower(): name for name in skill_candidates}
+		candidate_map = {canonicalize_skill_key(name): name for name in skill_candidates}
 		merged: dict[str, CvSkillInput] = {
-			skill.name.lower(): skill
+			canonicalize_skill_key(skill.name): skill
 			for skill in rule_skills
 			if skill.name and skill.name.strip()
 		}
@@ -240,7 +286,7 @@ class CvIngestService:
 			if not raw_name:
 				continue
 
-			name = candidate_map.get(raw_name.lower(), raw_name)
+			name = candidate_map.get(canonicalize_skill_key(raw_name), raw_name)
 			if len(name) > 50:
 				continue
 
@@ -256,7 +302,7 @@ class CvIngestService:
 				years_of_experience = 0.0
 			years_of_experience = max(0.0, min(experience_years if experience_years > 0 else 20.0, years_of_experience))
 
-			key = name.lower()
+			key = canonicalize_skill_key(name)
 			existing = merged.get(key)
 			if existing:
 				merged[key] = CvSkillInput(
@@ -291,14 +337,16 @@ class CvIngestService:
 	def extract_profile(db: Session, cv_text: str) -> ExtractedCvProfile:
 		cleaned_text = CvIngestService._clean_text(cv_text)
 		skill_candidates = CvIngestService._collect_skill_candidates(db)
+		skill_alias_lookup = CvIngestService._collect_skill_alias_lookup(db, skill_candidates)
 
 		extracted_skills: list[CvSkillInput] = []
 		seen: set[str] = set()
-		for candidate in skill_candidates:
-			if candidate.lower() in seen:
+		for alias_key, candidate in skill_alias_lookup.items():
+			candidate_key = canonicalize_skill_key(candidate)
+			if not alias_key or not candidate_key or candidate_key in seen:
 				continue
-			if CvIngestService._contains_keyword(cleaned_text, candidate):
-				seen.add(candidate.lower())
+			if CvIngestService._contains_keyword(cleaned_text, alias_key):
+				seen.add(candidate_key)
 				extracted_skills.append(
 					CvSkillInput(
 						name=candidate,
@@ -376,6 +424,8 @@ class CvIngestService:
 		job_skills: list[JobSkillInput] = []
 		for item in job.job_skills:
 			if not item.skill or not item.skill.name:
+				continue
+			if is_non_skill_role_label(item.skill.name):
 				continue
 			raw_importance = item.importance if item.importance is not None else 0.6
 			importance = raw_importance if raw_importance <= 1 else min(raw_importance / 3.0, 1.0)

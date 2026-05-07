@@ -46,7 +46,7 @@ def crawl_jobs_batch_api(payload: CrawlBatchRequest, db: Session = Depends(get_d
 
 @router.get("/")
 def list_jobs(db: Session = Depends(get_db), limit: int = 20):
-    jobs = db.query(Job).order_by(desc(Job.created_at)).limit(limit).all()
+    jobs = db.query(Job).order_by(desc(Job.scraped_at)).limit(limit).all()
     return {
         "total": len(jobs),
         "jobs": [
@@ -81,7 +81,10 @@ def get_job_detail(job_id: int, db: Session = Depends(get_db)):
         "salary_min": job.salary_min,
         "salary_max": job.salary_max,
         "currency": job.currency.value if job.currency else None,
-        "job_description": job.description_raw,
+        "job_description": job.description_clean or job.description_raw,
+        "role_responsibilities": job.role_responsibilities,
+        "skills_qualifications": job.skills_qualifications,
+        "benefits": job.benefits,
         "job_requirements": [
             item.skill.name
             for item in job.job_skills

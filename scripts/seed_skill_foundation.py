@@ -15,7 +15,7 @@ from app.models.job_skill import JobSkill
 from app.models.skill import Skill
 from app.models.skill_course import SkillCourse
 from app.services.course_duration_service import CourseDurationService
-from app.services.skill_normalization import normalize_skill_key
+from app.services.skill_normalization import get_skill_aliases, normalize_skill_key
 
 
 ALIASES_MAP: dict[str, list[str]] = {
@@ -35,6 +35,8 @@ ALIASES_MAP: dict[str, list[str]] = {
     "CI/CD": ["cicd", "ci cd", "continuous integration", "continuous delivery"],
     "AWS": ["amazon web services"],
     "GCP": ["google cloud", "google cloud platform"],
+    "MS SQL": ["mssql", "sql server", "microsoft sql server"],
+    "OOP": ["object oriented programming", "object-oriented programming"],
     "C/C++": ["c", "c plus plus", "cpp"],
     "C++": ["cpp", "c plus plus"],
 }
@@ -116,12 +118,33 @@ def _normalize_aliases(raw_aliases: list[str]) -> list[str]:
     return result
 
 
+def seed_foundational_skills(db) -> int:
+    existing = {
+        normalize_skill_key(skill.name)
+        for skill in db.query(Skill).all()
+        if skill.name
+    }
+
+    inserted = 0
+    for skill_name in ALIASES_MAP:
+        key = normalize_skill_key(skill_name)
+        if not key or key in existing:
+            continue
+
+        db.add(Skill(name=skill_name, category="technical", aliases=[], is_active=True))
+        existing.add(key)
+        inserted += 1
+
+    db.commit()
+    return inserted
+
+
 def seed_aliases(db) -> int:
     updated = 0
     skills = db.query(Skill).all()
     for skill in skills:
         aliases = skill.aliases or []
-        dynamic_aliases = ALIASES_MAP.get(skill.name, [])
+        dynamic_aliases = [*ALIASES_MAP.get(skill.name, []), *get_skill_aliases(skill.name)]
         merged = _normalize_aliases([*aliases, *dynamic_aliases])
 
         if merged != aliases:
@@ -229,11 +252,13 @@ def sync_course_hours(db) -> int:
 def main() -> None:
     db = get_standalone_db()
     try:
+        skills_inserted = seed_foundational_skills(db)
         aliases_updated = seed_aliases(db)
         importance_updated = tier_importance(db)
         courses_inserted = seed_courses(db)
         course_hours_updated = sync_course_hours(db)
 
+        print(f"skills inserted: {skills_inserted}")
         print(f"aliases updated: {aliases_updated}")
         print(f"job_skills importance tiered: {importance_updated}")
         print(f"skill_courses inserted: {courses_inserted}")

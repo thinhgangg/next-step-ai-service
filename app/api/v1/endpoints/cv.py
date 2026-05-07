@@ -1,5 +1,5 @@
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
-from sqlalchemy import desc
+from sqlalchemy import desc, text
 from sqlalchemy.orm import Session
 from pathlib import Path
 import json
@@ -22,6 +22,7 @@ from app.schemas.roadmap import (
     WeakSkillInput,
 )
 from app.services.analysis_service import AnalysisService
+from app.services.ai_service import AIService
 from app.services.job_matching_service import JobMatchingService
 from app.services.learning_duration_service import LearningDurationService
 from app.services.pdf_processor import CvIngestService
@@ -58,6 +59,47 @@ def _estimate_ats_score(cv_text: str) -> float:
     return min(1.0, score)
 
 
+def _fallback_cv_review(match_result, gap_result, roadmap_result) -> dict:
+    score = int(match_result.score or 0)
+    if score >= 75:
+        verdict = "strong_match"
+        summary = "CV đang phù hợp khá tốt với job, có thể ưu tiên tinh chỉnh cách trình bày và bằng chứng dự án."
+    elif score >= 45:
+        verdict = "potential_match"
+        summary = "CV có nền tảng phù hợp nhưng vẫn cần bổ sung một số kỹ năng hoặc bằng chứng để sát yêu cầu job hơn."
+    else:
+        verdict = "weak_match"
+        summary = "CV hiện còn lệch khá nhiều so với job, nên tập trung học các kỹ năng thiếu trước khi ứng tuyển."
+
+    matched = list(match_result.matchedSkills or [])[:4]
+    missing = [item.skill for item in gap_result.skillGap.missing[:4]]
+    weak = [item.skill for item in gap_result.skillGap.weak[:4]]
+
+    strengths = [f"Đã khớp với yêu cầu: {', '.join(matched)}."] if matched else []
+    concerns = []
+    if missing:
+        concerns.append(f"Còn thiếu: {', '.join(missing)}.")
+    if weak:
+        concerns.append(f"Cần cải thiện mức độ thành thạo: {', '.join(weak)}.")
+    if roadmap_result.total_weeks > 0:
+        concerns.append(f"Roadmap ước tính cần khoảng {roadmap_result.total_weeks} tuần.")
+
+    recommendations = []
+    for skill in [*missing, *weak][:4]:
+        recommendations.append(f"Bổ sung project hoặc kinh nghiệm thực tế liên quan đến {skill}.")
+    if not recommendations:
+        recommendations.append("Tối ưu CV bằng số liệu, kết quả dự án và mô tả vai trò cụ thể hơn.")
+
+    return {
+        "summary": summary,
+        "strengths": strengths[:4],
+        "concerns": concerns[:4],
+        "recommendations": recommendations[:4],
+        "verdict": verdict,
+        "source": "fallback",
+    }
+
+
 def _ensure_analysis_table() -> None:
     Base.metadata.create_all(
         bind=engine,
@@ -67,6 +109,13 @@ def _ensure_analysis_table() -> None:
             SkillGap.__table__,
         ],
     )
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                "ALTER TABLE cv_analysis_results "
+                "ADD COLUMN IF NOT EXISTS ai_review_json JSON"
+            )
+        )
 
 
 def _build_skill_lookup(db: Session) -> tuple[dict[str, Skill], dict[str, Skill]]:
@@ -406,6 +455,14 @@ def _run_analysis(
         resources=roadmap_resources,
     )
     roadmap_result = RoadmapService.generate(roadmap_request)
+    ai_review = AIService.generate_cv_job_review(
+        cv_text=cv_text,
+        extracted_profile=extracted.model_dump(mode="json"),
+        job_context=job_context.model_dump(mode="json"),
+        job_match=match_result.model_dump(mode="json"),
+        gap_analysis=gap_result.model_dump(mode="json"),
+        roadmap=roadmap_result.model_dump(mode="json"),
+    ) or _fallback_cv_review(match_result, gap_result, roadmap_result)
 
     _ensure_analysis_table()
     analysis_result = CvAnalysisResult(
@@ -417,6 +474,7 @@ def _run_analysis(
         job_match_json=match_result.model_dump(mode="json"),
         gap_analysis_json=gap_result.model_dump(mode="json"),
         roadmap_json=roadmap_result.model_dump(mode="json"),
+        ai_review_json=ai_review,
     )
     db.add(analysis_result)
     db.commit()
@@ -436,6 +494,7 @@ def _run_analysis(
         job_match=match_result,
         gap_analysis=gap_result,
         roadmap=roadmap_result,
+        ai_review=ai_review,
     )
 
 
@@ -532,4 +591,5 @@ def get_analysis_result(analysis_id: int, db: Session = Depends(get_db)) -> CvIn
         job_match=row.job_match_json,
         gap_analysis=row.gap_analysis_json,
         roadmap=row.roadmap_json,
+        ai_review=row.ai_review_json,
     )
