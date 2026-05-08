@@ -10,6 +10,8 @@ from app.core.config import settings
 
 
 class AIService:
+	MODEL_NAME = "gemini-2.5-flash"
+
 	@staticmethod
 	def _build_client() -> genai.Client:
 		return genai.Client(
@@ -51,7 +53,7 @@ class AIService:
 			client = AIService._build_client()
 			prompt = f"Trích xuất danh sách kỹ năng IT từ văn bản sau (chỉ trả về từ khóa, cách nhau bằng dấu phẩy): {jd_text}"
 			response = client.models.generate_content(
-				model="gemini-1.5-flash",
+				model=AIService.MODEL_NAME,
 				contents=prompt,
 			)
 			if response and response.text:
@@ -100,7 +102,7 @@ class AIService:
 		try:
 			client = AIService._build_client()
 			response = client.models.generate_content(
-				model="gemini-1.5-flash",
+				model=AIService.MODEL_NAME,
 				contents=prompt,
 			)
 			text = (response.text or "").strip() if response else ""
@@ -163,7 +165,7 @@ class AIService:
 		try:
 			client = AIService._build_client()
 			response = client.models.generate_content(
-				model="gemini-1.5-flash",
+				model=AIService.MODEL_NAME,
 				contents=prompt,
 			)
 			text = (response.text or "").strip() if response else ""
