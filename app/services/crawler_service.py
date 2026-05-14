@@ -100,6 +100,10 @@ class JobCrawler:
         options.add_argument("--disable-dev-shm-usage")
         options.add_argument("--disable-gpu")
         options.add_argument("--blink-settings=imagesEnabled=false")
+        options.add_argument("--ignore-certificate-errors")
+        options.add_argument("--disable-blink-features=AutomationControlled")
+        options.add_argument("--disable-web-resources")
+        options.add_argument("--disable-sync")
         options.page_load_strategy = "eager"
         options.add_argument(f"user-agent={self._user_agent}")
         options.add_experimental_option(
@@ -948,7 +952,14 @@ class JobCrawler:
         return None
 
     def _extract_skill_tags_from_page(self, soup: BeautifulSoup) -> list[str]:
-        selectors = [
+        # Find and remove "More jobs for you" section to avoid capturing unrelated skills
+        for div in soup.find_all("div"):
+            span = div.find("span")
+            if span and "More jobs for you" in span.get_text():
+                div.decompose()
+                break
+
+        skill_selectors = [
             "div.flex.flex-wrap.items-center.gap-1 a",
             "a[class*='skill']",
             "span[class*='skill']",
@@ -958,7 +969,7 @@ class JobCrawler:
         ]
 
         skills: list[str] = []
-        for selector in selectors:
+        for selector in skill_selectors:
             for element in soup.select(selector):
                 text = element.get_text(" ", strip=True)
                 if text and 1 < len(text) <= 50:
@@ -1316,11 +1327,31 @@ class JobCrawler:
 
             print(f"DEBUG: Bắt đầu crawl Selenium: {url}")
             driver = self._create_driver()
-            driver.get(url)
-            WebDriverWait(driver, self._body_wait_seconds).until(EC.presence_of_element_located((By.TAG_NAME, "body")))
-            WebDriverWait(driver, self._body_wait_seconds).until(
-                lambda current_driver: current_driver.execute_script("return document.readyState") in ["interactive", "complete"]
-            )
+            page_load_timeout = False
+            try:
+                driver.get(url)
+            except TimeoutException as exc:
+                print(f"WARNING: Timeout khi tải trang {url}: {exc}")
+                page_load_timeout = True
+                try:
+                    driver.execute_script("window.stop();")
+                except Exception:
+                    pass
+
+            if not page_load_timeout:
+                try:
+                    WebDriverWait(driver, self._body_wait_seconds).until(EC.presence_of_element_located((By.TAG_NAME, "body")))
+                    WebDriverWait(driver, self._body_wait_seconds).until(
+                        lambda current_driver: current_driver.execute_script("return document.readyState") in ["interactive", "complete"]
+                    )
+                except TimeoutException as exc:
+                    print(f"WARNING: Trang chưa sẵn sàng hoàn toàn {url}: {exc}")
+            else:
+                try:
+                    WebDriverWait(driver, 5).until(EC.presence_of_element_located((By.TAG_NAME, "body")))
+                except TimeoutException:
+                    print(f"WARNING: Page không load được dữ liệu {url}")
+
             time.sleep(self._post_load_sleep_seconds)
 
             html = driver.page_source
