@@ -21,6 +21,7 @@ LEVEL_MAP: Dict[str, int] = {
 class MatchComponents:
     keyword: float
     skill: float
+    experience: float
     title: float
     ats: float
 
@@ -180,6 +181,19 @@ class JobMatchingService:
         return max(0.0, 1.0 - 0.3 * diff)
 
     @staticmethod
+    def calculate_experience_match(payload: JobMatchRequest) -> float:
+        required_years = max(0.0, float(payload.job_years_required or 0))
+        current_years = max(0.0, float(payload.cv_years_experience or 0))
+
+        if required_years <= 0:
+            return 1.0 if current_years > 0 else 0.75
+
+        if current_years >= required_years:
+            return 1.0
+
+        return max(0.0, min(1.0, current_years / required_years))
+
+    @staticmethod
     def calculate_ats_readability(payload: JobMatchRequest) -> float:
         if payload.ats_parse_score is not None:
             return max(0.0, min(1.0, payload.ats_parse_score))
@@ -228,13 +242,15 @@ class JobMatchingService:
         components = MatchComponents(
             keyword=JobMatchingService.calculate_keyword_match(payload),
             skill=JobMatchingService.calculate_skill_match(payload),
+            experience=JobMatchingService.calculate_experience_match(payload),
             title=JobMatchingService.calculate_title_match(payload),
             ats=JobMatchingService.calculate_ats_readability(payload),
         )
 
         score = (
-            0.60 * components.keyword
+            0.45 * components.keyword
             + 0.20 * components.skill
+            + 0.15 * components.experience
             + 0.10 * components.title
             + 0.10 * components.ats
         )
@@ -245,7 +261,7 @@ class JobMatchingService:
             score=round(score * 100),
             scoreBreakdownJson=ScoreBreakdown(
                 skillMatch=round(components.skill * 100),
-                experienceMatch=0,
+                experienceMatch=round(components.experience * 100),
                 levelMatch=round(components.title * 100),
                 salaryMatch=0,
                 locationMatch=round(components.ats * 100),

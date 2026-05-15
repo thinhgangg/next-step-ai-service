@@ -19,6 +19,7 @@ class CvAnalysisResult(Base):
     job_match_json = Column(JSON, nullable=False)
     gap_analysis_json = Column(JSON, nullable=False)
     roadmap_json = Column(JSON, nullable=False)
+    ai_review_json = Column(JSON, nullable=True)
 
     created_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
 

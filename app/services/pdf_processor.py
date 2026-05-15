@@ -8,13 +8,20 @@ from zipfile import BadZipFile, ZipFile
 
 import fitz
 from sqlalchemy.orm import Session
+from sqlalchemy.exc import SQLAlchemyError
 
 from app.models.job import Job
 from app.models.skill import Skill
 from app.schemas.analyzer import CvSkillInput, JobSkillInput
 from app.schemas.cv import ExtractedCvProfile, JobContext
 from app.services.ai_service import AIService
-from app.services.skill_normalization import canonicalize_skill_key, get_skill_aliases, is_non_skill_role_label, normalize_skill_key
+from app.services.skill_normalization import (
+	canonicalize_skill_key,
+	expand_skill_labels,
+	get_skill_aliases,
+	is_non_skill_role_label,
+	normalize_skill_key,
+)
 
 
 class CvIngestService:
@@ -113,18 +120,35 @@ class CvIngestService:
 			raw_text = CvIngestService._extract_text_from_pdf(file_bytes)
 		elif lower_name.endswith(".docx") or "wordprocessingml" in content:
 			raw_text = CvIngestService._extract_text_from_docx(file_bytes)
-		elif lower_name.endswith(".txt") or content.startswith("text/"):
+		elif lower_name.endswith((".txt", ".md", ".markdown")) or content.startswith("text/"):
 			try:
 				raw_text = file_bytes.decode("utf-8")
 			except UnicodeDecodeError:
 				raw_text = file_bytes.decode("latin-1", errors="ignore")
 		else:
-			raise ValueError("Unsupported file type. Use PDF, DOCX, or TXT")
+			raise ValueError("Unsupported file type. Use PDF, DOCX, TXT, or MD")
 
 		cleaned = CvIngestService._clean_text(raw_text)
 		if len(cleaned) < 30:
 			raise ValueError("Could not extract enough text from CV file")
 		return cleaned
+
+	@staticmethod
+	def extract_text_from_job_file(filename: str, content_type: Optional[str], file_bytes: bytes) -> str:
+		lower_name = (filename or "").lower()
+		content = (content_type or "").lower()
+		if lower_name.endswith((".png", ".jpg", ".jpeg", ".webp")) or content.startswith("image/"):
+			text = AIService.extract_text_from_image(file_bytes, content_type)
+			if not text or len(CvIngestService._clean_text(text)) < 30:
+				raise ValueError("Could not extract enough text from JD image. Check GEMINI_API_KEY or upload a clearer image")
+			return CvIngestService._clean_text(text)
+
+		try:
+			return CvIngestService.extract_text_from_file(filename, content_type, file_bytes)
+		except ValueError as exc:
+			if lower_name.endswith(".doc"):
+				raise ValueError("Unsupported JD file type .doc. Use TXT, MD, PDF, or DOCX") from exc
+			raise
 
 	@staticmethod
 	def _contains_keyword(text: str, keyword: str) -> bool:
@@ -189,11 +213,17 @@ class CvIngestService:
 
 	@staticmethod
 	def _collect_skill_candidates(db: Session) -> list[str]:
-		skill_names = [
-			item.name
-			for item in db.query(Skill).all()
-			if item.name and not is_non_skill_role_label(item.name)
-		]
+		try:
+			skill_names = [
+				item.name
+				for item in db.query(Skill).all()
+				if item.name and not is_non_skill_role_label(item.name)
+			]
+		except SQLAlchemyError as exc:
+			db.rollback()
+			print(f"--- SKILL CANDIDATE DB FALLBACK: {exc} ---")
+			return CvIngestService._fallback_skills
+
 		if skill_names:
 			return skill_names
 		return CvIngestService._fallback_skills
@@ -202,7 +232,14 @@ class CvIngestService:
 	def _collect_skill_alias_lookup(db: Session, skill_candidates: list[str]) -> dict[str, str]:
 		lookup: dict[str, str] = {}
 
-		for skill in db.query(Skill).all():
+		try:
+			db_skills = db.query(Skill).all()
+		except SQLAlchemyError as exc:
+			db.rollback()
+			print(f"--- SKILL ALIAS DB FALLBACK: {exc} ---")
+			db_skills = []
+
+		for skill in db_skills:
 			if not skill.name:
 				continue
 			if is_non_skill_role_label(skill.name):
@@ -446,4 +483,138 @@ class CvIngestService:
 			job_location=job.location,
 			job_is_remote=bool(job.location and "remote" in job.location.lower()),
 			job_skills=job_skills,
+		)
+
+	@staticmethod
+	def _infer_job_title(job_text: str, filename: str | None = None) -> str:
+		lines = [line.strip() for line in re.split(r"[\r\n]+", job_text or "") if line.strip()]
+		for line in lines[:8]:
+			if len(line) <= 120 and not line.endswith(":"):
+				return line
+		if filename:
+			stem = re.sub(r"\.[^.]+$", "", filename).replace("_", " ").replace("-", " ").strip()
+			if stem:
+				return stem[:120]
+		return "Uploaded JD"
+
+	@staticmethod
+	def _infer_job_location(job_text: str) -> str | None:
+		text = job_text or ""
+		location_aliases = [
+			("Remote", ["remote", "work from home", "làm việc từ xa", "lam viec tu xa"]),
+			("Ho Chi Minh", ["ho chi minh", "hcm", "tp.hcm", "sai gon"]),
+			("Ha Noi", ["ha noi", "hanoi"]),
+			("Da Nang", ["da nang"]),
+			("Can Tho", ["can tho"]),
+		]
+		lowered = text.lower()
+		for label, aliases in location_aliases:
+			if any(alias in lowered for alias in aliases):
+				return label
+		return None
+
+	@staticmethod
+	def build_uploaded_job_context(db: Session, job_text: str, filename: str | None = None) -> JobContext:
+		cleaned_text = CvIngestService._clean_text(job_text)
+		if len(cleaned_text) < 30:
+			raise ValueError("JD text is too short")
+
+		skill_candidates = CvIngestService._collect_skill_candidates(db)
+		skill_alias_lookup = CvIngestService._collect_skill_alias_lookup(db, skill_candidates)
+		candidate_map = {canonicalize_skill_key(name): name for name in skill_candidates}
+
+		job_skills: dict[str, JobSkillInput] = {}
+
+		for alias_key, candidate in skill_alias_lookup.items():
+			candidate_key = canonicalize_skill_key(candidate)
+			if not alias_key or not candidate_key:
+				continue
+			if is_non_skill_role_label(candidate):
+				continue
+			if CvIngestService._contains_keyword(cleaned_text, alias_key):
+				importance = 0.65
+				job_skills.setdefault(
+					candidate_key,
+					JobSkillInput(
+						name=candidate,
+						importance=importance,
+						required_proficiency=CvIngestService._required_proficiency_from_importance(importance),
+					),
+				)
+
+		ai_job = AIService.extract_job_profile(cleaned_text, skill_candidates) or {}
+		ai_skills = ai_job.get("job_skills", []) if isinstance(ai_job, dict) else []
+		if not isinstance(ai_skills, list):
+			ai_skills = []
+
+		for item in ai_skills:
+			if not isinstance(item, dict):
+				continue
+			raw_name = str(item.get("name", "")).strip()
+			if not raw_name:
+				continue
+
+			for expanded_name in expand_skill_labels(raw_name):
+				if is_non_skill_role_label(expanded_name):
+					continue
+				key = canonicalize_skill_key(expanded_name)
+				if not key:
+					continue
+				name = candidate_map.get(key, expanded_name)
+				if len(name) > 50:
+					continue
+
+				try:
+					importance = float(item.get("importance", 0.65))
+				except (TypeError, ValueError):
+					importance = 0.65
+				importance = max(0.35, min(1.0, importance))
+
+				try:
+					required_proficiency = float(item.get("required_proficiency", 0))
+				except (TypeError, ValueError):
+					required_proficiency = 0.0
+				if required_proficiency <= 0:
+					required_proficiency = CvIngestService._required_proficiency_from_importance(importance)
+				required_proficiency = max(0.0, min(1.0, required_proficiency))
+
+				existing = job_skills.get(key)
+				if existing and existing.importance >= importance and existing.required_proficiency >= required_proficiency:
+					continue
+				job_skills[key] = JobSkillInput(
+					name=name,
+					importance=importance,
+					required_proficiency=required_proficiency,
+				)
+
+		title = str(ai_job.get("title") or "").strip() if isinstance(ai_job, dict) else ""
+		if not title:
+			title = CvIngestService._infer_job_title(cleaned_text, filename)
+
+		level = CvIngestService._normalize_level_value(str(ai_job.get("job_level") or "")) if isinstance(ai_job, dict) else None
+		if not level:
+			level = CvIngestService._normalize_level(f"{title} {cleaned_text}")
+
+		try:
+			ai_years = float(ai_job.get("job_years_required", 0)) if isinstance(ai_job, dict) else 0.0
+		except (TypeError, ValueError):
+			ai_years = 0.0
+
+		location = str(ai_job.get("job_location") or "").strip() if isinstance(ai_job, dict) else ""
+		if not location:
+			location = CvIngestService._infer_job_location(cleaned_text) or ""
+
+		is_remote = bool(ai_job.get("job_is_remote")) if isinstance(ai_job, dict) else False
+		if not is_remote:
+			is_remote = "remote" in f"{location} {cleaned_text}".lower()
+
+		return JobContext(
+			job_id=0,
+			title=title[:255],
+			source_url=f"uploaded://{filename or 'jd'}",
+			job_level=level,
+			job_years_required=round(max(CvIngestService._extract_years_experience(cleaned_text), ai_years, 0.0), 2),
+			job_location=location or None,
+			job_is_remote=is_remote,
+			job_skills=sorted(job_skills.values(), key=lambda item: (item.importance, item.name.lower()), reverse=True),
 		)

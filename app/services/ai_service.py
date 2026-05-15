@@ -5,6 +5,7 @@ import re
 from typing import Any
 
 from google import genai
+from google.genai import types
 
 from app.core.config import settings
 
@@ -115,6 +116,97 @@ class AIService:
 			return data
 		except Exception as exc:
 			print(f"--- CV AI ENRICHMENT ERROR: {exc} ---")
+			return None
+
+	@staticmethod
+	def extract_text_from_image(file_bytes: bytes, content_type: str | None = None) -> str | None:
+		if not settings.CV_AI_ENRICHMENT_ENABLED:
+			return None
+
+		if not settings.GEMINI_API_KEY:
+			return None
+
+		if not file_bytes:
+			return None
+
+		mime_type = (content_type or "image/png").strip() or "image/png"
+		prompt = (
+			"Bạn là OCR cho ảnh job description. "
+			"Hãy đọc toàn bộ chữ trong ảnh và trả về văn bản thuần, giữ thứ tự nội dung càng sát ảnh càng tốt. "
+			"Không nhận xét, không thêm markdown."
+		)
+
+		try:
+			client = AIService._build_client()
+			response = client.models.generate_content(
+				model=AIService.MODEL_NAME,
+				contents=[
+					prompt,
+					types.Part.from_bytes(data=file_bytes, mime_type=mime_type),
+				],
+			)
+			text = (response.text or "").strip() if response else ""
+			return text or None
+		except Exception as exc:
+			print(f"--- IMAGE OCR AI ERROR: {exc} ---")
+			return None
+
+	@staticmethod
+	def extract_job_profile(job_text: str, skill_candidates: list[str]) -> dict[str, Any] | None:
+		if not settings.CV_AI_ENRICHMENT_ENABLED:
+			return None
+
+		if not settings.GEMINI_API_KEY:
+			return None
+
+		cleaned_text = (job_text or "").strip()
+		if len(cleaned_text) < 80:
+			return None
+
+		limited_text = cleaned_text[:8000]
+		candidate_text = ", ".join(skill_candidates[:400])
+
+		prompt = (
+			"Bạn là chuyên gia phân tích job description IT. "
+			"Hãy trích xuất thông tin job và chỉ trả về JSON hợp lệ, không thêm markdown. "
+			"Schema JSON:\n"
+			"{\n"
+			'  "title": string,\n'
+			'  "job_level": "intern|junior|mid|senior|lead",\n'
+			'  "job_years_required": number,\n'
+			'  "job_location": string,\n'
+			'  "job_is_remote": boolean,\n'
+			'  "job_skills": [\n'
+			'    {"name": string, "importance": number(0..1), "required_proficiency": number(0..1)}\n'
+			"  ]\n"
+			"}\n"
+			"Yêu cầu:\n"
+			"- Chỉ chọn skill trong danh sách ứng viên nếu có thể.\n"
+			"- Không đưa role label như Full-stack Developer, Backend Developer thành skill.\n"
+			"- importance càng cao nếu skill là bắt buộc, xuất hiện trong requirement hoặc tiêu đề.\n"
+			"- required_proficiency phản ánh mức job yêu cầu: cơ bản 0.5, trung bình 0.65, cao 0.8.\n"
+			"- Không bịa thông tin; nếu không rõ thì để giá trị bảo thủ.\n"
+			"- Dùng tiếng Anh cho tên skill nếu có thể.\n\n"
+			f"Danh sách skill ứng viên: {candidate_text}\n\n"
+			f"JD text:\n{limited_text}"
+		)
+
+		try:
+			client = AIService._build_client()
+			response = client.models.generate_content(
+				model=AIService.MODEL_NAME,
+				contents=prompt,
+			)
+			text = (response.text or "").strip() if response else ""
+			if not text:
+				return None
+
+			data = AIService._extract_json(text)
+			if not data:
+				return None
+			return data
+		except Exception as exc:
+			print(f"--- JOB AI ENRICHMENT ERROR: {exc} ---")
 			return None
 
 	@staticmethod

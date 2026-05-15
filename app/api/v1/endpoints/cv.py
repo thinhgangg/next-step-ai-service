@@ -1,5 +1,6 @@
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from sqlalchemy import desc, text
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 from pathlib import Path
 import json
@@ -109,6 +110,8 @@ def _ensure_analysis_table() -> None:
             SkillGap.__table__,
         ],
     )
+    with engine.begin() as connection:
+        connection.execute(text("ALTER TABLE cv_analysis_results ADD COLUMN IF NOT EXISTS ai_review_json JSON"))
 
 
 def _build_skill_lookup(db: Session) -> tuple[dict[str, Skill], dict[str, Skill]]:
@@ -174,11 +177,16 @@ def _load_skill_groups() -> list[set[str]]:
 
 
 def _build_duration_and_resource_index(db: Session) -> tuple[dict[str, int], dict[str, list[ResourceInput]]]:
-    rows = (
-        db.query(SkillCourse, Skill)
-        .join(Skill, Skill.skill_id == SkillCourse.skill_id)
-        .all()
-    )
+    try:
+        rows = (
+            db.query(SkillCourse, Skill)
+            .join(Skill, Skill.skill_id == SkillCourse.skill_id)
+            .all()
+        )
+    except SQLAlchemyError as exc:
+        db.rollback()
+        print(f"--- ROADMAP RESOURCE DB FALLBACK: {exc} ---")
+        return {}, {}
 
     baseline_hours: dict[str, int] = {}
     resources: dict[str, list[ResourceInput]] = {}
@@ -469,6 +477,7 @@ def _run_analysis(
         job_match_json=match_result.model_dump(mode="json"),
         gap_analysis_json=gap_result.model_dump(mode="json"),
         roadmap_json=roadmap_result.model_dump(mode="json"),
+        ai_review_json=ai_review,
     )
     db.add(analysis_result)
     db.commit()
@@ -483,6 +492,114 @@ def _run_analysis(
 
     return CvIngestResponse(
         analysis_result_id=analysis_result.analysis_id,
+        extracted_profile=extracted,
+        job_context=job_context,
+        job_match=match_result,
+        gap_analysis=gap_result,
+        roadmap=roadmap_result,
+        ai_review=ai_review,
+    )
+
+
+def _run_uploaded_jd_analysis(
+    db: Session,
+    cv_text: str,
+    jd_text: str,
+    timeframe_weeks: int,
+    max_skills_per_phase: int,
+    jd_filename: str | None = None,
+) -> CvIngestResponse:
+    try:
+        extracted = CvIngestService.extract_profile(db, cv_text)
+        job_context = CvIngestService.build_uploaded_job_context(db, jd_text, jd_filename)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to process uploaded CV/JD: {exc}") from exc
+
+    analysis_payload = GapAnalysisRequest(
+        cv_skills=extracted.cv_skills,
+        job_skills=job_context.job_skills,
+        cv_years_experience=extracted.cv_years_experience,
+        job_years_required=job_context.job_years_required,
+        cv_level=extracted.cv_level,
+        job_level=job_context.job_level,
+        preferred_locations=extracted.preferred_locations,
+        job_location=job_context.job_location,
+        job_is_remote=job_context.job_is_remote,
+        cv_certifications=extracted.cv_certifications,
+        job_certifications=[],
+        cv_title=_infer_cv_title(cv_text),
+        job_title=job_context.title,
+        ats_parse_score=_estimate_ats_score(cv_text),
+    )
+
+    match_result = JobMatchingService.calculate_job_match(analysis_payload)
+    gap_result = AnalysisService.generate_gap_analysis(analysis_payload)
+
+    relation_groups = _load_skill_groups()
+    baseline_hours_map, resource_map = _build_duration_and_resource_index(db)
+    cv_skill_set = {
+        normalize_skill_key(item.name)
+        for item in extracted.cv_skills
+        if normalize_skill_key(item.name)
+    }
+
+    roadmap_resources: list[ResourceInput] = []
+    for values in resource_map.values():
+        roadmap_resources.extend(values)
+
+    missing_inputs: list[MissingSkillInput] = []
+    for item in gap_result.skillGap.missing:
+        key = normalize_skill_key(item.skill)
+        transfer_bonus, direction_factor = _transfer_bonus(item.skill, cv_skill_set, relation_groups, baseline_hours_map)
+        missing_inputs.append(
+            MissingSkillInput(
+                skill=item.skill,
+                importance=item.importance,
+                reason=item.reason,
+                baseline_hours=baseline_hours_map.get(key),
+                transfer_bonus=transfer_bonus,
+                transfer_direction_factor=direction_factor,
+            )
+        )
+
+    weak_inputs: list[WeakSkillInput] = []
+    for item in gap_result.skillGap.weak:
+        key = normalize_skill_key(item.skill)
+        transfer_bonus, direction_factor = _transfer_bonus(item.skill, cv_skill_set, relation_groups, baseline_hours_map)
+        weak_inputs.append(
+            WeakSkillInput(
+                skill=item.skill,
+                current_proficiency=item.current_proficiency,
+                required_proficiency=item.required_proficiency,
+                gap=item.gap,
+                baseline_hours=baseline_hours_map.get(key),
+                transfer_bonus=transfer_bonus,
+                transfer_direction_factor=direction_factor,
+            )
+        )
+
+    roadmap_request = RoadmapGenerateRequest(
+        goal_title=f"Match {job_context.title}",
+        timeframe_weeks=timeframe_weeks,
+        max_skills_per_phase=max_skills_per_phase,
+        missing_skills=missing_inputs,
+        weak_skills=weak_inputs,
+        resources=roadmap_resources,
+    )
+    roadmap_result = RoadmapService.generate(roadmap_request)
+    ai_review = AIService.generate_cv_job_review(
+        cv_text=cv_text,
+        extracted_profile=extracted.model_dump(mode="json"),
+        job_context=job_context.model_dump(mode="json"),
+        job_match=match_result.model_dump(mode="json"),
+        gap_analysis=gap_result.model_dump(mode="json"),
+        roadmap=roadmap_result.model_dump(mode="json"),
+    ) or _fallback_cv_review(match_result, gap_result, roadmap_result)
+
+    return CvIngestResponse(
+        analysis_result_id=None,
         extracted_profile=extracted,
         job_context=job_context,
         job_match=match_result,
@@ -548,6 +665,71 @@ async def ingest_cv_file(
     )
 
 
+@router.post("/scan-upload", response_model=CvIngestResponse)
+async def scan_cv_with_uploaded_jd(
+    cv_file: UploadFile = File(default=None, description="Resume file: PDF, DOCX, TXT, or MD"),
+    jd_file: UploadFile = File(default=None, description="Single JD file: PDF, DOCX, TXT, MD, PNG, JPG, or WebP"),
+    jd_files: list[UploadFile] = File(default=None, description="Multiple JD files/images. Send repeated jd_files parts"),
+    cv_text: str | None = Form(default=None),
+    jd_text: str | None = Form(default=None),
+    timeframe_weeks: int = Form(default=0),
+    max_skills_per_phase: int = Form(default=4),
+    db: Session = Depends(get_db),
+) -> CvIngestResponse:
+    if not cv_file and not (cv_text and cv_text.strip()):
+        raise HTTPException(status_code=400, detail="Provide cv_file or cv_text")
+
+    uploaded_jd_files = [item for item in (jd_files or []) if item and item.filename]
+    if jd_file and jd_file.filename:
+        uploaded_jd_files.insert(0, jd_file)
+
+    if not uploaded_jd_files and not (jd_text and jd_text.strip()):
+        raise HTTPException(status_code=400, detail="Provide jd_file or jd_text")
+
+    if timeframe_weeks < 0:
+        raise HTTPException(status_code=400, detail="timeframe_weeks must be >= 0 (0 means unlimited)")
+
+    if max_skills_per_phase < 1 or max_skills_per_phase > 5:
+        raise HTTPException(status_code=400, detail="max_skills_per_phase must be between 1 and 5")
+
+    try:
+        final_cv_text = (cv_text or "").strip()
+        if cv_file:
+            cv_bytes = await cv_file.read()
+            final_cv_text = CvIngestService.extract_text_from_file(cv_file.filename or "", cv_file.content_type, cv_bytes)
+
+        jd_text_parts: list[str] = []
+        if jd_text and jd_text.strip():
+            jd_text_parts.append(jd_text.strip())
+
+        jd_filenames: list[str] = []
+        for file_item in uploaded_jd_files:
+            jd_filenames.append(file_item.filename or "jd")
+            jd_bytes = await file_item.read()
+            extracted_jd = CvIngestService.extract_text_from_job_file(
+                file_item.filename or "",
+                file_item.content_type,
+                jd_bytes,
+            )
+            jd_text_parts.append(extracted_jd)
+
+        final_jd_text = "\n\n".join(part for part in jd_text_parts if part.strip())
+        jd_filename = ", ".join(jd_filenames) if jd_filenames else None
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to read uploaded file: {exc}") from exc
+
+    return _run_uploaded_jd_analysis(
+        db=db,
+        cv_text=final_cv_text,
+        jd_text=final_jd_text,
+        timeframe_weeks=timeframe_weeks,
+        max_skills_per_phase=max_skills_per_phase,
+        jd_filename=jd_filename,
+    )
+
+
 @router.get("/analysis-results", response_model=AnalysisHistoryResponse)
 def list_analysis_results(
     limit: int = 20,
@@ -602,5 +784,5 @@ def get_analysis_result(
         job_match=row.job_match_json,
         gap_analysis=row.gap_analysis_json,
         roadmap=row.roadmap_json,
-        ai_review=None,
+        ai_review=row.ai_review_json,
     )
