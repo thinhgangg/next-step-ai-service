@@ -3,14 +3,17 @@ from sqlalchemy import desc, text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 from pathlib import Path
+from datetime import datetime, timezone
 import json
 import re
 
 from app.db.base_class import Base
 from app.db.session import engine
 from app.db.session import get_db
+from app.models.company import Company
 from app.models.cv_analysis_result import CvAnalysisResult
 from app.models.cv_skill import CvSkill
+from app.models.job import Job, JobLevel, JobStatus
 from app.models.skill_course import SkillCourse
 from app.models.skill import Skill
 from app.models.skill_gap import SkillGap
@@ -112,6 +115,47 @@ def _ensure_analysis_table() -> None:
     )
     with engine.begin() as connection:
         connection.execute(text("ALTER TABLE cv_analysis_results ADD COLUMN IF NOT EXISTS ai_review_json JSON"))
+
+
+def _persist_uploaded_jd_job(
+    db: Session,
+    job_context,
+    jd_text: str,
+    jd_filename: str | None,
+) -> Job:
+    company = db.query(Company).filter(Company.name == "Uploaded JD").one_or_none()
+    if not company:
+        company = Company(name="Uploaded JD")
+        db.add(company)
+        db.flush()
+
+    level = None
+    try:
+        level = JobLevel(job_context.job_level)
+    except ValueError:
+        level = None
+
+    timestamp = datetime.now(timezone.utc)
+    source_name = re.sub(r"[^a-zA-Z0-9._-]+", "-", jd_filename or "job-description").strip("-")
+    source_url = f"uploaded://jd/{int(timestamp.timestamp() * 1000)}-{source_name or 'job-description'}"
+    cleaned_jd_text = CvIngestService._clean_text(jd_text)
+
+    job = Job(
+        company_company_id=company.company_id,
+        title=job_context.title or "Uploaded JD",
+        level=level,
+        location=job_context.job_location,
+        description_raw=jd_text or "Uploaded JD",
+        description_clean=cleaned_jd_text or None,
+        skills_qualifications=cleaned_jd_text or None,
+        source_url=source_url[:1000],
+        source_site="uploaded_jd",
+        scraped_at=timestamp,
+        status=JobStatus.active,
+    )
+    db.add(job)
+    db.flush()
+    return job
 
 
 def _build_skill_lookup(db: Session) -> tuple[dict[str, Skill], dict[str, Skill]]:
@@ -508,6 +552,7 @@ def _run_uploaded_jd_analysis(
     timeframe_weeks: int,
     max_skills_per_phase: int,
     jd_filename: str | None = None,
+    cv_filename: str | None = None,
 ) -> CvIngestResponse:
     try:
         extracted = CvIngestService.extract_profile(db, cv_text)
@@ -598,8 +643,34 @@ def _run_uploaded_jd_analysis(
         roadmap=roadmap_result.model_dump(mode="json"),
     ) or _fallback_cv_review(match_result, gap_result, roadmap_result)
 
+    _ensure_analysis_table()
+    uploaded_job = _persist_uploaded_jd_job(db, job_context, jd_text, jd_filename)
+    job_context = job_context.model_copy(update={"job_id": uploaded_job.job_id})
+
+    analysis_result = CvAnalysisResult(
+        job_job_id=uploaded_job.job_id,
+        cv_filename=cv_filename,
+        cv_text_excerpt=(cv_text[:1200] if cv_text else None),
+        extracted_profile_json=extracted.model_dump(mode="json"),
+        job_context_json=job_context.model_dump(mode="json"),
+        job_match_json=match_result.model_dump(mode="json"),
+        gap_analysis_json=gap_result.model_dump(mode="json"),
+        roadmap_json=roadmap_result.model_dump(mode="json"),
+        ai_review_json=ai_review,
+    )
+    db.add(analysis_result)
+    db.commit()
+    db.refresh(analysis_result)
+
+    _persist_analysis_details(
+        db=db,
+        analysis_id=analysis_result.analysis_id,
+        extracted=extracted,
+        gap_result=gap_result,
+    )
+
     return CvIngestResponse(
-        analysis_result_id=None,
+        analysis_result_id=analysis_result.analysis_id,
         extracted_profile=extracted,
         job_context=job_context,
         job_match=match_result,
@@ -727,6 +798,7 @@ async def scan_cv_with_uploaded_jd(
         timeframe_weeks=timeframe_weeks,
         max_skills_per_phase=max_skills_per_phase,
         jd_filename=jd_filename,
+        cv_filename=cv_file.filename if cv_file else None,
     )
 
 
