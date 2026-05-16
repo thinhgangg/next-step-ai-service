@@ -82,6 +82,23 @@ class CvIngestService:
 		return re.sub(r"\s+", " ", value or "").strip()
 
 	@staticmethod
+	def _validate_job_description_quality(job_text: str) -> None:
+		cleaned_text = CvIngestService._clean_text(job_text)
+		if len(cleaned_text) < 30:
+			raise ValueError("Job description is too short")
+
+		words = [
+			word.lower()
+			for word in re.findall(r"[^\W_]{2,}", cleaned_text, flags=re.UNICODE)
+		]
+		unique_words = set(words)
+
+		if len(words) < 8 or len(unique_words) < 5:
+			raise ValueError(
+				"Job description is not detailed enough. Include responsibilities, required skills, or experience details"
+			)
+
+	@staticmethod
 	def _extract_text_from_pdf(file_bytes: bytes) -> str:
 		doc = fitz.open(stream=file_bytes, filetype="pdf")
 		try:
@@ -516,8 +533,7 @@ class CvIngestService:
 	@staticmethod
 	def build_uploaded_job_context(db: Session, job_text: str, filename: str | None = None) -> JobContext:
 		cleaned_text = CvIngestService._clean_text(job_text)
-		if len(cleaned_text) < 30:
-			raise ValueError("JD text is too short")
+		CvIngestService._validate_job_description_quality(cleaned_text)
 
 		skill_candidates = CvIngestService._collect_skill_candidates(db)
 		skill_alias_lookup = CvIngestService._collect_skill_alias_lookup(db, skill_candidates)
