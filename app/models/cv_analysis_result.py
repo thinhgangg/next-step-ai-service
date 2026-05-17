@@ -12,6 +12,8 @@ class CvAnalysisResult(Base):
     analysis_id = Column(Integer, primary_key=True, index=True)
     job_job_id = Column(Integer, ForeignKey("jobs.job_id"), nullable=True, index=True)
     job_upload_id = Column(Integer, ForeignKey("job_uploads.job_upload_id"), nullable=True, index=True)
+    user_id = Column(Integer, nullable=True, index=True)
+    cv_id = Column(Integer, nullable=True, index=True)
     cv_filename = Column(String(255), nullable=True)
     cv_text_excerpt = Column(Text, nullable=True)
 

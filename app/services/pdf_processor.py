@@ -83,6 +83,23 @@ class CvIngestService:
 	@staticmethod
 	def _clean_text(value: str) -> str:
 		return re.sub(r"\s+", " ", value or "").strip()
+	
+	@staticmethod
+	def _validate_job_description_quality(job_text: str) -> None:
+		cleaned_text = CvIngestService._clean_text(job_text)
+		if len(cleaned_text) < 30:
+			raise ValueError("Job description is too short")
+
+		words = [
+			word.lower()
+			for word in re.findall(r"[^\W_]{2,}", cleaned_text, flags=re.UNICODE)
+		]
+		unique_words = set(words)
+
+		if len(words) < 8 or len(unique_words) < 5:
+			raise ValueError(
+				"Job description is not detailed enough. Include responsibilities, required skills, or experience details"
+			)
 
 	@staticmethod
 	def _clean_structured_text(value: str) -> str:

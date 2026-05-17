@@ -3,7 +3,7 @@ from sqlalchemy import desc, text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 from pathlib import Path
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 import json
 import re
 
@@ -261,8 +261,11 @@ def _ensure_analysis_table() -> None:
     with engine.begin() as connection:
         connection.execute(text("ALTER TABLE cv_analysis_results ADD COLUMN IF NOT EXISTS ai_review_json JSON"))
         connection.execute(text("ALTER TABLE cv_analysis_results ADD COLUMN IF NOT EXISTS job_upload_id INTEGER"))
+        connection.execute(text("ALTER TABLE cv_analysis_results ADD COLUMN IF NOT EXISTS user_id INTEGER"))
+        connection.execute(text("ALTER TABLE cv_analysis_results ADD COLUMN IF NOT EXISTS cv_id INTEGER"))
         connection.execute(text("ALTER TABLE cv_analysis_results ALTER COLUMN job_job_id DROP NOT NULL"))
         connection.execute(text("ALTER TABLE job_uploads ADD COLUMN IF NOT EXISTS company_name VARCHAR(255)"))
+        connection.execute(text("ALTER TABLE job_uploads ADD COLUMN IF NOT EXISTS title VARCHAR(255)"))
         connection.execute(text("ALTER TABLE job_uploads ADD COLUMN IF NOT EXISTS level VARCHAR(50)"))
         connection.execute(text("ALTER TABLE job_uploads ADD COLUMN IF NOT EXISTS employment_type VARCHAR(50)"))
         connection.execute(text("ALTER TABLE job_uploads ADD COLUMN IF NOT EXISTS experience VARCHAR(50)"))
@@ -278,11 +281,22 @@ def _ensure_analysis_table() -> None:
         connection.execute(text("ALTER TABLE job_uploads ADD COLUMN IF NOT EXISTS benefits TEXT"))
         connection.execute(text("ALTER TABLE job_uploads ADD COLUMN IF NOT EXISTS source_url VARCHAR(1000)"))
         connection.execute(text("ALTER TABLE job_uploads ADD COLUMN IF NOT EXISTS source_site VARCHAR(100)"))
+        connection.execute(text("ALTER TABLE job_uploads ADD COLUMN IF NOT EXISTS source_filename VARCHAR(1000)"))
+        connection.execute(text("ALTER TABLE job_uploads ADD COLUMN IF NOT EXISTS content_excerpt TEXT"))
+        connection.execute(text("ALTER TABLE job_uploads ADD COLUMN IF NOT EXISTS job_context_json JSON"))
+        connection.execute(text("ALTER TABLE job_uploads ADD COLUMN IF NOT EXISTS job_level VARCHAR(50)"))
+        connection.execute(text("ALTER TABLE job_uploads ADD COLUMN IF NOT EXISTS job_years_required DOUBLE PRECISION"))
+        connection.execute(text("ALTER TABLE job_uploads ADD COLUMN IF NOT EXISTS job_location VARCHAR(255)"))
+        connection.execute(text("ALTER TABLE job_uploads ADD COLUMN IF NOT EXISTS job_is_remote BOOLEAN"))
         connection.execute(text("ALTER TABLE job_uploads ADD COLUMN IF NOT EXISTS posted_at TIMESTAMP WITH TIME ZONE"))
         connection.execute(text("ALTER TABLE job_uploads ADD COLUMN IF NOT EXISTS status VARCHAR(50)"))
+        connection.execute(text("ALTER TABLE job_uploads ADD COLUMN IF NOT EXISTS created_at TIMESTAMP WITH TIME ZONE"))
+        connection.execute(text("UPDATE job_uploads SET title = COALESCE(title, 'Uploaded JD')"))
         connection.execute(text("UPDATE job_uploads SET description_raw = COALESCE(description_raw, content_excerpt, '')"))
         connection.execute(text("UPDATE job_uploads SET source_site = COALESCE(source_site, 'upload')"))
         connection.execute(text("UPDATE job_uploads SET status = COALESCE(status, 'uploaded')"))
+        connection.execute(text("UPDATE job_uploads SET job_is_remote = COALESCE(job_is_remote, FALSE)"))
+        connection.execute(text("UPDATE job_uploads SET created_at = COALESCE(created_at, NOW())"))
 
 
 def _persist_uploaded_jd_job(
@@ -682,6 +696,8 @@ def _run_analysis(
     _ensure_analysis_table()
     analysis_result = CvAnalysisResult(
         job_job_id=job_context.job_id,
+        user_id=user_id,
+        cv_id=cv_id,
         cv_filename=cv_filename,
         cv_text_excerpt=(cv_text[:1200] if cv_text else None),
         extracted_profile_json=extracted.model_dump(mode="json"),
@@ -721,6 +737,8 @@ def _run_uploaded_jd_analysis(
     max_skills_per_phase: int,
     jd_filename: str | None = None,
     cv_filename: str | None = None,
+    user_id: int | None = None,
+    cv_id: int | None = None,
 ) -> CvIngestResponse:
     try:
         extracted = CvIngestService.extract_profile(db, cv_text)
@@ -873,6 +891,8 @@ def _run_uploaded_jd_analysis(
         analysis_result = CvAnalysisResult(
             job_job_id=None,
             job_upload_id=job_upload.job_upload_id,
+            user_id=user_id,
+            cv_id=cv_id,
             cv_filename=cv_filename,
             cv_text_excerpt=(cv_text[:1200] if cv_text else None),
             extracted_profile_json=extracted.model_dump(mode="json"),
@@ -970,6 +990,8 @@ async def scan_cv_with_uploaded_jd(
     jd_files: list[UploadFile | str] = File(default=None, description="Multiple JD files/images. Send repeated jd_files parts"),
     cv_text: str | None = Form(default=None),
     jd_text: str | None = Form(default=None),
+    user_id: int | None = Form(default=None),
+    cv_id: int | None = Form(default=None),
     timeframe_weeks: int = Form(default=0),
     max_skills_per_phase: int = Form(default=4),
     db: Session = Depends(get_db),
@@ -1030,11 +1052,14 @@ async def scan_cv_with_uploaded_jd(
         max_skills_per_phase=max_skills_per_phase,
         jd_filename=jd_filename,
         cv_filename=(cv_file.filename if cv_file else None),
+        user_id=user_id,
+        cv_id=cv_id,
     )
 
 
 @router.get("/analysis-results", response_model=AnalysisHistoryResponse)
 def list_analysis_results(
+    user_id: int,
     limit: int = 20,
     db: Session = Depends(get_db),
 ) -> AnalysisHistoryResponse:
@@ -1042,6 +1067,7 @@ def list_analysis_results(
     normalized_limit = max(1, min(limit, 100))
     rows = (
         db.query(CvAnalysisResult)
+        .filter(CvAnalysisResult.user_id == user_id)
         .order_by(desc(CvAnalysisResult.created_at), desc(CvAnalysisResult.analysis_id))
         .limit(normalized_limit)
         .all()
@@ -1050,6 +1076,8 @@ def list_analysis_results(
     items = [
         AnalysisHistoryItem(
             analysis_id=row.analysis_id,
+            user_id=row.user_id,
+            cv_id=row.cv_id,
             job_id=row.job_job_id,
             job_upload_id=row.job_upload_id,
             job_source="uploaded" if row.job_upload_id else "crawled",
@@ -1073,6 +1101,7 @@ def list_analysis_results(
 @router.get("/analysis-results/{analysis_id}", response_model=CvIngestResponse)
 def get_analysis_result(
     analysis_id: int,
+    user_id: int,
     db: Session = Depends(get_db),
 ) -> CvIngestResponse:
     _ensure_analysis_table()
@@ -1082,6 +1111,8 @@ def get_analysis_result(
         .first()
     )
     if not row:
+        raise HTTPException(status_code=404, detail="Analysis result not found")
+    if row.user_id != user_id:
         raise HTTPException(status_code=404, detail="Analysis result not found")
 
     return CvIngestResponse(
