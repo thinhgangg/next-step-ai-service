@@ -19,8 +19,8 @@ depends_on: Union[str, Sequence[str], None] = None
 
 
 def upgrade() -> None:
-    op.add_column("cv_analysis_results", sa.Column("ai_review_json", sa.JSON(), nullable=True))
+    op.execute("ALTER TABLE cv_analysis_results ADD COLUMN IF NOT EXISTS ai_review_json JSON")
 
 
 def downgrade() -> None:
-    op.drop_column("cv_analysis_results", "ai_review_json")
+    op.execute("ALTER TABLE cv_analysis_results DROP COLUMN IF EXISTS ai_review_json")

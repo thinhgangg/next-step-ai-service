@@ -10,7 +10,8 @@ class CvAnalysisResult(Base):
     __tablename__ = "cv_analysis_results"
 
     analysis_id = Column(Integer, primary_key=True, index=True)
-    job_job_id = Column(Integer, ForeignKey("jobs.job_id"), nullable=False, index=True)
+    job_job_id = Column(Integer, ForeignKey("jobs.job_id"), nullable=True, index=True)
+    job_upload_id = Column(Integer, ForeignKey("job_uploads.job_upload_id"), nullable=True, index=True)
     cv_filename = Column(String(255), nullable=True)
     cv_text_excerpt = Column(Text, nullable=True)
 
@@ -24,5 +25,6 @@ class CvAnalysisResult(Base):
     created_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
 
     job = relationship("Job")
+    job_upload = relationship("JobUpload", back_populates="analysis_results")
     cv_skills = relationship("CvSkill", back_populates="analysis", cascade="all, delete-orphan")
     skill_gaps = relationship("SkillGap", back_populates="analysis", cascade="all, delete-orphan")

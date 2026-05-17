@@ -63,7 +63,9 @@ class CvIngestResponse(BaseModel):
 
 class AnalysisHistoryItem(BaseModel):
 	analysis_id: int
-	job_id: int
+	job_id: Optional[int] = None
+	job_upload_id: Optional[int] = None
+	job_source: str = "crawled"
 	job_title: str
 	cv_filename: Optional[str] = None
 	created_at: datetime
