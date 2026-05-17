@@ -671,8 +671,7 @@ class CvIngestService:
 	@staticmethod
 	def build_uploaded_job_context(db: Session, job_text: str, filename: str | None = None) -> JobContext:
 		cleaned_text = CvIngestService._clean_text(job_text)
-		if len(cleaned_text) < 30:
-			raise ValueError("JD text is too short")
+		CvIngestService._validate_job_description_quality(cleaned_text)
 
 		skill_candidates = CvIngestService._collect_skill_candidates(db)
 		skill_alias_lookup = CvIngestService._collect_skill_alias_lookup(db, skill_candidates)

@@ -3,16 +3,18 @@ from sqlalchemy import desc, text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 from pathlib import Path
-from datetime import date
+from datetime import datetime, timezone
 import json
 import re
 
 from app.db.base_class import Base
 from app.db.session import engine
 from app.db.session import get_db
+from app.models.company import Company
 from app.models.cv_analysis_result import CvAnalysisResult
 from app.models.cv_skill import CvSkill
 from app.models.job_upload import JobUpload
+from app.models.job import Job, JobLevel, JobStatus
 from app.models.skill_course import SkillCourse
 from app.models.skill import Skill
 from app.models.skill_gap import SkillGap
@@ -281,6 +283,47 @@ def _ensure_analysis_table() -> None:
         connection.execute(text("UPDATE job_uploads SET description_raw = COALESCE(description_raw, content_excerpt, '')"))
         connection.execute(text("UPDATE job_uploads SET source_site = COALESCE(source_site, 'upload')"))
         connection.execute(text("UPDATE job_uploads SET status = COALESCE(status, 'uploaded')"))
+
+
+def _persist_uploaded_jd_job(
+    db: Session,
+    job_context,
+    jd_text: str,
+    jd_filename: str | None,
+) -> Job:
+    company = db.query(Company).filter(Company.name == "Uploaded JD").one_or_none()
+    if not company:
+        company = Company(name="Uploaded JD")
+        db.add(company)
+        db.flush()
+
+    level = None
+    try:
+        level = JobLevel(job_context.job_level)
+    except ValueError:
+        level = None
+
+    timestamp = datetime.now(timezone.utc)
+    source_name = re.sub(r"[^a-zA-Z0-9._-]+", "-", jd_filename or "job-description").strip("-")
+    source_url = f"uploaded://jd/{int(timestamp.timestamp() * 1000)}-{source_name or 'job-description'}"
+    cleaned_jd_text = CvIngestService._clean_text(jd_text)
+
+    job = Job(
+        company_company_id=company.company_id,
+        title=job_context.title or "Uploaded JD",
+        level=level,
+        location=job_context.job_location,
+        description_raw=jd_text or "Uploaded JD",
+        description_clean=cleaned_jd_text or None,
+        skills_qualifications=cleaned_jd_text or None,
+        source_url=source_url[:1000],
+        source_site="uploaded_jd",
+        scraped_at=timestamp,
+        status=JobStatus.active,
+    )
+    db.add(job)
+    db.flush()
+    return job
 
 
 def _build_skill_lookup(db: Session) -> tuple[dict[str, Skill], dict[str, Skill]]:
