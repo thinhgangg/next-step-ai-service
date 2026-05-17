@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import unicodedata
 import xml.etree.ElementTree as ET
 from io import BytesIO
 from typing import Optional
@@ -25,6 +26,8 @@ from app.services.skill_normalization import (
 
 
 class CvIngestService:
+	_last_uploaded_job_ai_payload: dict = {}
+
 	_fallback_skills = [
 		"Python",
 		"Java",
@@ -82,6 +85,34 @@ class CvIngestService:
 		return re.sub(r"\s+", " ", value or "").strip()
 
 	@staticmethod
+	def _clean_structured_text(value: str) -> str:
+		if not value:
+			return ""
+
+		text = str(value).replace("\r\n", "\n").replace("\r", "\n")
+		text = re.sub(r"[ \t]+", " ", text)
+		lines: list[str] = []
+		previous = ""
+		for raw_line in text.splitlines():
+			line = raw_line.strip()
+			if not line:
+				if lines and lines[-1] != "":
+					lines.append("")
+				continue
+			if line == previous:
+				continue
+			lines.append(line)
+			previous = line
+
+		cleaned = "\n".join(lines).strip()
+		return re.sub(r"\n{3,}", "\n\n", cleaned)
+
+	@staticmethod
+	def _strip_accents(value: str) -> str:
+		normalized = unicodedata.normalize("NFD", value or "")
+		return "".join(ch for ch in normalized if unicodedata.category(ch) != "Mn")
+
+	@staticmethod
 	def _extract_text_from_pdf(file_bytes: bytes) -> str:
 		doc = fitz.open(stream=file_bytes, filetype="pdf")
 		try:
@@ -103,7 +134,7 @@ class CvIngestService:
 		for node in root.iter():
 			if node.tag.endswith("}t") and node.text:
 				texts.append(node.text)
-		return " ".join(texts)
+		return "\n".join(texts)
 
 	@staticmethod
 	def extract_text_from_file(filename: str, content_type: Optional[str], file_bytes: bytes) -> str:
@@ -139,16 +170,35 @@ class CvIngestService:
 		content = (content_type or "").lower()
 		if lower_name.endswith((".png", ".jpg", ".jpeg", ".webp")) or content.startswith("image/"):
 			text = AIService.extract_text_from_image(file_bytes, content_type)
-			if not text or len(CvIngestService._clean_text(text)) < 30:
+			cleaned = CvIngestService._clean_structured_text(text or "")
+			if not cleaned or len(CvIngestService._clean_text(cleaned)) < 30:
 				raise ValueError("Could not extract enough text from JD image. Check GEMINI_API_KEY or upload a clearer image")
-			return CvIngestService._clean_text(text)
+			return cleaned
 
-		try:
-			return CvIngestService.extract_text_from_file(filename, content_type, file_bytes)
-		except ValueError as exc:
-			if lower_name.endswith(".doc"):
-				raise ValueError("Unsupported JD file type .doc. Use TXT, MD, PDF, or DOCX") from exc
-			raise
+		if not file_bytes:
+			raise ValueError("Uploaded file is empty")
+
+		if len(file_bytes) > 5 * 1024 * 1024:
+			raise ValueError("File size exceeds 5MB limit")
+
+		if lower_name.endswith(".pdf") or "pdf" in content:
+			raw_text = CvIngestService._extract_text_from_pdf(file_bytes)
+		elif lower_name.endswith(".docx") or "wordprocessingml" in content:
+			raw_text = CvIngestService._extract_text_from_docx(file_bytes)
+		elif lower_name.endswith((".txt", ".md", ".markdown")) or content.startswith("text/"):
+			try:
+				raw_text = file_bytes.decode("utf-8")
+			except UnicodeDecodeError:
+				raw_text = file_bytes.decode("latin-1", errors="ignore")
+		elif lower_name.endswith(".doc"):
+			raise ValueError("Unsupported JD file type .doc. Use TXT, MD, PDF, or DOCX")
+		else:
+			raise ValueError("Unsupported file type. Use PDF, DOCX, TXT, MD, PNG, JPG, or WebP")
+
+		cleaned = CvIngestService._clean_structured_text(raw_text)
+		if len(CvIngestService._clean_text(cleaned)) < 30:
+			raise ValueError("Could not extract enough text from JD file")
+		return cleaned
 
 	@staticmethod
 	def _contains_keyword(text: str, keyword: str) -> bool:
@@ -158,10 +208,17 @@ class CvIngestService:
 
 	@staticmethod
 	def _normalize_level(raw_text: str) -> str:
-		text = (raw_text or "").lower()
-		for level in ["lead", "senior", "mid", "junior", "intern"]:
-			keywords = CvIngestService._level_keywords[level]
-			if any(keyword in text for keyword in keywords):
+		text = CvIngestService._strip_accents(raw_text or "").lower()
+		keyword_map = {
+			"intern": ["intern", "internship", "trainee", "thuc tap", "thuc tap sinh"],
+			"lead": ["tech lead", "team lead", "lead", "principal"],
+			"senior": ["senior", "sr", "expert"],
+			"mid": ["middle", "mid level", "mid-level", "mid", "intermediate"],
+			"junior": ["junior", "jr", "fresher", "entry level", "entry-level"],
+		}
+		for level in ["intern", "lead", "senior", "mid", "junior"]:
+			keywords = keyword_map[level]
+			if any(re.search(rf"(?<!\w){re.escape(keyword)}(?!\w)", text) for keyword in keywords):
 				return level
 		return "junior"
 
@@ -488,6 +545,26 @@ class CvIngestService:
 	@staticmethod
 	def _infer_job_title(job_text: str, filename: str | None = None) -> str:
 		lines = [line.strip() for line in re.split(r"[\r\n]+", job_text or "") if line.strip()]
+		title_keywords = (
+			"developer",
+			"engineer",
+			"intern",
+			"fresher",
+			"junior",
+			"senior",
+			"software",
+			"data",
+			"ai",
+			"it",
+			"thuc tap",
+			"thuc tap sinh",
+			"ky su",
+			"lap trinh",
+		)
+		for line in lines[:10]:
+			normalized = CvIngestService._strip_accents(line).lower()
+			if any(keyword in normalized for keyword in title_keywords) and len(line) <= 160:
+				return line.strip("() ")[:120]
 		for line in lines[:8]:
 			if len(line) <= 120 and not line.endswith(":"):
 				return line
@@ -499,19 +576,97 @@ class CvIngestService:
 
 	@staticmethod
 	def _infer_job_location(job_text: str) -> str | None:
-		text = job_text or ""
+		ascii_text = CvIngestService._strip_accents(job_text or "").lower()
 		location_aliases = [
-			("Remote", ["remote", "work from home", "làm việc từ xa", "lam viec tu xa"]),
+			("Remote", ["remote", "work from home", "lam viec tu xa"]),
 			("Ho Chi Minh", ["ho chi minh", "hcm", "tp.hcm", "sai gon"]),
 			("Ha Noi", ["ha noi", "hanoi"]),
 			("Da Nang", ["da nang"]),
 			("Can Tho", ["can tho"]),
 		]
-		lowered = text.lower()
 		for label, aliases in location_aliases:
-			if any(alias in lowered for alias in aliases):
+			if any(alias in ascii_text for alias in aliases):
 				return label
 		return None
+
+	@staticmethod
+	def extract_uploaded_job_sections(job_text: str) -> dict[str, str | None]:
+		lines = [line.strip(" \t•-") for line in (job_text or "").splitlines()]
+		sections: dict[str, list[str]] = {
+			"role_responsibilities": [],
+			"skills_qualifications": [],
+			"benefits": [],
+		}
+		current: str | None = None
+		heading_map = {
+			"role_responsibilities": [
+				"role responsibilities",
+				"role and responsibilities",
+				"responsibilities",
+				"job responsibilities",
+				"mo ta cong viec",
+				"trach nhiem",
+			],
+			"skills_qualifications": [
+				"skills qualifications",
+				"skills and qualifications",
+				"qualifications",
+				"requirements",
+				"job requirements",
+				"yeu cau",
+				"ky nang",
+			],
+			"benefits": [
+				"benefits",
+				"salary and benefits",
+				"quyen loi",
+				"phuc loi",
+				"dai ngo",
+			],
+		}
+
+		for raw_line in lines:
+			line = raw_line.strip()
+			if not line:
+				continue
+			heading = CvIngestService._strip_accents(line).lower()
+			heading = heading.replace("&", " and ")
+			heading = re.sub(r"[^a-z0-9]+", " ", heading)
+			heading = re.sub(r"\s+", " ", heading).strip()
+
+			matched_section = None
+			if len(heading) <= 60:
+				for section, aliases in heading_map.items():
+					if any(alias == heading or heading.startswith(alias) for alias in aliases):
+						matched_section = section
+						break
+			if matched_section:
+				current = matched_section
+				continue
+
+			if current:
+				if re.fullmatch(r"trang\s+\d+|page\s+\d+", heading):
+					continue
+				sections[current].append(line)
+
+		return {
+			key: "\n".join(value).strip() or None
+			for key, value in sections.items()
+		}
+
+	@staticmethod
+	def _skill_has_text_evidence(job_text: str, skill_name: str) -> bool:
+		if not skill_name:
+			return False
+
+		if CvIngestService._contains_keyword(job_text, skill_name):
+			return True
+
+		for alias in get_skill_aliases(skill_name):
+			if CvIngestService._contains_keyword(job_text, alias):
+				return True
+
+		return False
 
 	@staticmethod
 	def build_uploaded_job_context(db: Session, job_text: str, filename: str | None = None) -> JobContext:
@@ -523,29 +678,13 @@ class CvIngestService:
 		skill_alias_lookup = CvIngestService._collect_skill_alias_lookup(db, skill_candidates)
 		candidate_map = {canonicalize_skill_key(name): name for name in skill_candidates}
 
-		job_skills: dict[str, JobSkillInput] = {}
-
-		for alias_key, candidate in skill_alias_lookup.items():
-			candidate_key = canonicalize_skill_key(candidate)
-			if not alias_key or not candidate_key:
-				continue
-			if is_non_skill_role_label(candidate):
-				continue
-			if CvIngestService._contains_keyword(cleaned_text, alias_key):
-				importance = 0.65
-				job_skills.setdefault(
-					candidate_key,
-					JobSkillInput(
-						name=candidate,
-						importance=importance,
-						required_proficiency=CvIngestService._required_proficiency_from_importance(importance),
-					),
-				)
-
 		ai_job = AIService.extract_job_profile(cleaned_text, skill_candidates) or {}
+		CvIngestService._last_uploaded_job_ai_payload = ai_job if isinstance(ai_job, dict) else {}
 		ai_skills = ai_job.get("job_skills", []) if isinstance(ai_job, dict) else []
 		if not isinstance(ai_skills, list):
 			ai_skills = []
+
+		job_skills: dict[str, JobSkillInput] = {}
 
 		for item in ai_skills:
 			if not isinstance(item, dict):
@@ -556,6 +695,8 @@ class CvIngestService:
 
 			for expanded_name in expand_skill_labels(raw_name):
 				if is_non_skill_role_label(expanded_name):
+					continue
+				if not CvIngestService._skill_has_text_evidence(cleaned_text, expanded_name):
 					continue
 				key = canonicalize_skill_key(expanded_name)
 				if not key:
@@ -587,13 +728,31 @@ class CvIngestService:
 					required_proficiency=required_proficiency,
 				)
 
+		if not job_skills:
+			for alias_key, candidate in skill_alias_lookup.items():
+				candidate_key = canonicalize_skill_key(candidate)
+				if not alias_key or not candidate_key:
+					continue
+				if is_non_skill_role_label(candidate):
+					continue
+				if CvIngestService._contains_keyword(cleaned_text, alias_key):
+					importance = 0.65
+					job_skills.setdefault(
+						candidate_key,
+						JobSkillInput(
+							name=candidate,
+							importance=importance,
+							required_proficiency=CvIngestService._required_proficiency_from_importance(importance),
+						),
+					)
+
 		title = str(ai_job.get("title") or "").strip() if isinstance(ai_job, dict) else ""
 		if not title:
 			title = CvIngestService._infer_job_title(cleaned_text, filename)
 
-		level = CvIngestService._normalize_level_value(str(ai_job.get("job_level") or "")) if isinstance(ai_job, dict) else None
-		if not level:
-			level = CvIngestService._normalize_level(f"{title} {cleaned_text}")
+		rule_level = CvIngestService._normalize_level(f"{title} {cleaned_text}")
+		ai_level = CvIngestService._normalize_level_value(str(ai_job.get("job_level") or "")) if isinstance(ai_job, dict) else None
+		level = rule_level or ai_level or "junior"
 
 		try:
 			ai_years = float(ai_job.get("job_years_required", 0)) if isinstance(ai_job, dict) else 0.0

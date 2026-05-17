@@ -3,6 +3,7 @@ from sqlalchemy import desc, text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 from pathlib import Path
+from datetime import date
 import json
 import re
 
@@ -11,6 +12,7 @@ from app.db.session import engine
 from app.db.session import get_db
 from app.models.cv_analysis_result import CvAnalysisResult
 from app.models.cv_skill import CvSkill
+from app.models.job_upload import JobUpload
 from app.models.skill_course import SkillCourse
 from app.models.skill import Skill
 from app.models.skill_gap import SkillGap
@@ -60,6 +62,149 @@ def _estimate_ats_score(cv_text: str) -> float:
     return min(1.0, score)
 
 
+def _clean_optional_text(value) -> str | None:
+    text_value = str(value or "").strip()
+    return text_value or None
+
+
+def _clean_db_string(value, max_length: int, blank_if_too_long: bool = False) -> str | None:
+    text_value = _clean_optional_text(value)
+    if not text_value:
+        return None
+    if len(text_value) <= max_length:
+        return text_value
+    if blank_if_too_long:
+        return None
+    return text_value[:max_length]
+
+
+def _parse_optional_int(value) -> int | None:
+    if value is None or value == "":
+        return None
+    try:
+        return int(float(str(value).replace(",", "").strip()))
+    except (TypeError, ValueError):
+        return None
+
+
+def _parse_optional_date(value) -> date | None:
+    text_value = str(value or "").strip()
+    if not text_value:
+        return None
+    try:
+        return date.fromisoformat(text_value[:10])
+    except ValueError:
+        return None
+
+
+def _jd_contains(jd_text: str, value: str | None) -> bool:
+    text_value = str(value or "").strip()
+    if not text_value:
+        return False
+    normalized_jd = re.sub(r"\s+", " ", (jd_text or "")).lower()
+    normalized_value = re.sub(r"\s+", " ", text_value).lower()
+    return normalized_value in normalized_jd
+
+
+def _clean_job_title(value, jd_text: str, fallback: str) -> str:
+    title = _clean_db_string(value, 255)
+    if title and not _jd_contains(jd_text, title):
+        title = None
+    if not title:
+        title = _clean_db_string(fallback, 255)
+    if not title:
+        return "Uploaded JD"
+
+    noisy_markers = ["resume", "curriculum vitae", "education", "project", "candidate"]
+    if any(marker in title.lower() for marker in noisy_markers):
+        return "Uploaded JD"
+
+    return title
+
+
+def _clean_company_name(value, jd_text: str) -> str | None:
+    company = _clean_db_string(value, 255)
+    if not company:
+        return None
+    if _jd_contains(jd_text, company):
+        return company
+    return None
+
+
+def _normalize_employment_type(value, jd_text: str) -> str | None:
+    raw = f"{value or ''} {jd_text or ''}".lower()
+    patterns = [
+        ("Fulltime", ["fulltime", "full-time", "full time"]),
+        ("Part-time", ["part-time", "part time"]),
+        ("Contract", ["contract", "contractor"]),
+        ("Internship", ["internship", "intern"]),
+        ("Hybrid", ["hybrid"]),
+        ("Freelance", ["freelance"]),
+        ("Remote", ["remote", "work from home"]),
+    ]
+    for label, aliases in patterns:
+        if any(alias in raw for alias in aliases):
+            return label
+    return None
+
+
+def _extract_experience_label(jd_text: str, ai_value) -> tuple[str | None, float]:
+    text = str(jd_text or "")
+    ai_text = str(ai_value or "").strip()
+    candidates = re.findall(
+        r"(\d+(?:[\.,]\d+)?)\s*\+?\s*(?:years?|yrs?|năm)\s*(?:of\s+)?(?:experience|exp)?",
+        f"{ai_text} {text}",
+        flags=re.IGNORECASE,
+    )
+    if not candidates:
+        return None, 0.0
+    values = [float(item.replace(",", ".")) for item in candidates]
+    years = max(values)
+    label = f"{years:g}+ years"
+    return label, years
+
+
+def _extract_salary(jd_text: str, ai_min, ai_max, ai_currency) -> tuple[int | None, int | None, str | None]:
+    salary_min = _parse_optional_int(ai_min)
+    salary_max = _parse_optional_int(ai_max)
+    currency = _clean_optional_text(ai_currency)
+    currency = currency.upper() if currency else None
+    if currency not in {"VND", "USD"}:
+        currency = None
+
+    text = str(jd_text or "")
+    usd_match = re.search(r"\$\s*(\d+(?:[\.,]\d+)?)\s*(?:-|–|to)?\s*\$?\s*(\d+(?:[\.,]\d+)?)?", text, flags=re.IGNORECASE)
+    if usd_match:
+        salary_min = int(float(usd_match.group(1).replace(",", "")))
+        salary_max = int(float((usd_match.group(2) or usd_match.group(1)).replace(",", "")))
+        currency = "USD"
+
+    vnd_match = re.search(
+        r"(\d+(?:[\.,]\d+)?)\s*(?:-|–|to|đến)?\s*(\d+(?:[\.,]\d+)?)?\s*(?:triệu|tr|million|vnd|₫)",
+        text,
+        flags=re.IGNORECASE,
+    )
+    if vnd_match and currency != "USD":
+        left = float(vnd_match.group(1).replace(",", "."))
+        right = float((vnd_match.group(2) or vnd_match.group(1)).replace(",", "."))
+        multiplier = 1_000_000 if re.search(r"triệu|tr|million", vnd_match.group(0), flags=re.IGNORECASE) else 1
+        salary_min = int(left * multiplier)
+        salary_max = int(right * multiplier)
+        currency = "VND"
+
+    return salary_min, salary_max, currency
+
+
+def _section_or_none(ai_value, jd_text: str, max_length: int = 5000) -> str | None:
+    text_value = _clean_optional_text(ai_value)
+    if not text_value:
+        return None
+    noisy_markers = ["resume", "curriculum vitae", "education", "cv_", "extracted_profile"]
+    if any(marker in text_value.lower() for marker in noisy_markers):
+        return None
+    return text_value[:max_length]
+
+
 def _fallback_cv_review(match_result, gap_result, roadmap_result) -> dict:
     score = int(match_result.score or 0)
     if score >= 75:
@@ -107,11 +252,35 @@ def _ensure_analysis_table() -> None:
         tables=[
             CvAnalysisResult.__table__,
             CvSkill.__table__,
+            JobUpload.__table__,
             SkillGap.__table__,
         ],
     )
     with engine.begin() as connection:
         connection.execute(text("ALTER TABLE cv_analysis_results ADD COLUMN IF NOT EXISTS ai_review_json JSON"))
+        connection.execute(text("ALTER TABLE cv_analysis_results ADD COLUMN IF NOT EXISTS job_upload_id INTEGER"))
+        connection.execute(text("ALTER TABLE cv_analysis_results ALTER COLUMN job_job_id DROP NOT NULL"))
+        connection.execute(text("ALTER TABLE job_uploads ADD COLUMN IF NOT EXISTS company_name VARCHAR(255)"))
+        connection.execute(text("ALTER TABLE job_uploads ADD COLUMN IF NOT EXISTS level VARCHAR(50)"))
+        connection.execute(text("ALTER TABLE job_uploads ADD COLUMN IF NOT EXISTS employment_type VARCHAR(50)"))
+        connection.execute(text("ALTER TABLE job_uploads ADD COLUMN IF NOT EXISTS experience VARCHAR(50)"))
+        connection.execute(text("ALTER TABLE job_uploads ADD COLUMN IF NOT EXISTS application_deadline DATE"))
+        connection.execute(text("ALTER TABLE job_uploads ADD COLUMN IF NOT EXISTS location VARCHAR(255)"))
+        connection.execute(text("ALTER TABLE job_uploads ADD COLUMN IF NOT EXISTS salary_min INTEGER"))
+        connection.execute(text("ALTER TABLE job_uploads ADD COLUMN IF NOT EXISTS salary_max INTEGER"))
+        connection.execute(text("ALTER TABLE job_uploads ADD COLUMN IF NOT EXISTS currency VARCHAR(10)"))
+        connection.execute(text("ALTER TABLE job_uploads ADD COLUMN IF NOT EXISTS description_raw TEXT"))
+        connection.execute(text("ALTER TABLE job_uploads ADD COLUMN IF NOT EXISTS description_clean TEXT"))
+        connection.execute(text("ALTER TABLE job_uploads ADD COLUMN IF NOT EXISTS role_responsibilities TEXT"))
+        connection.execute(text("ALTER TABLE job_uploads ADD COLUMN IF NOT EXISTS skills_qualifications TEXT"))
+        connection.execute(text("ALTER TABLE job_uploads ADD COLUMN IF NOT EXISTS benefits TEXT"))
+        connection.execute(text("ALTER TABLE job_uploads ADD COLUMN IF NOT EXISTS source_url VARCHAR(1000)"))
+        connection.execute(text("ALTER TABLE job_uploads ADD COLUMN IF NOT EXISTS source_site VARCHAR(100)"))
+        connection.execute(text("ALTER TABLE job_uploads ADD COLUMN IF NOT EXISTS posted_at TIMESTAMP WITH TIME ZONE"))
+        connection.execute(text("ALTER TABLE job_uploads ADD COLUMN IF NOT EXISTS status VARCHAR(50)"))
+        connection.execute(text("UPDATE job_uploads SET description_raw = COALESCE(description_raw, content_excerpt, '')"))
+        connection.execute(text("UPDATE job_uploads SET source_site = COALESCE(source_site, 'upload')"))
+        connection.execute(text("UPDATE job_uploads SET status = COALESCE(status, 'uploaded')"))
 
 
 def _build_skill_lookup(db: Session) -> tuple[dict[str, Skill], dict[str, Skill]]:
@@ -508,6 +677,7 @@ def _run_uploaded_jd_analysis(
     timeframe_weeks: int,
     max_skills_per_phase: int,
     jd_filename: str | None = None,
+    cv_filename: str | None = None,
 ) -> CvIngestResponse:
     try:
         extracted = CvIngestService.extract_profile(db, cv_text)
@@ -516,6 +686,29 @@ def _run_uploaded_jd_analysis(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Failed to process uploaded CV/JD: {exc}") from exc
+
+    ai_job = CvIngestService._last_uploaded_job_ai_payload or {}
+    rule_title = CvIngestService._infer_job_title(jd_text, jd_filename)
+    cleaned_title = _clean_job_title(ai_job.get("title"), jd_text, rule_title)
+    company_name = _clean_company_name(ai_job.get("company_name"), jd_text)
+    employment_type = _normalize_employment_type(ai_job.get("employment_type"), jd_text)
+    experience_label, experience_years = _extract_experience_label(jd_text, ai_job.get("experience"))
+    salary_min, salary_max, currency = _extract_salary(
+        jd_text,
+        ai_job.get("salary_min"),
+        ai_job.get("salary_max"),
+        ai_job.get("currency"),
+    )
+    description_clean = CvIngestService._clean_text(jd_text)
+    parsed_sections = CvIngestService.extract_uploaded_job_sections(jd_text)
+    source_filename = _clean_db_string(jd_filename, 1000)
+    source_url = _clean_db_string(f"uploaded://{jd_filename or 'jd'}", 1000)
+    job_context = job_context.model_copy(
+        update={
+            "title": cleaned_title,
+            "job_years_required": max(job_context.job_years_required or 0.0, experience_years),
+        }
+    )
 
     analysis_payload = GapAnalysisRequest(
         cv_skills=extracted.cv_skills,
@@ -598,8 +791,70 @@ def _run_uploaded_jd_analysis(
         roadmap=roadmap_result.model_dump(mode="json"),
     ) or _fallback_cv_review(match_result, gap_result, roadmap_result)
 
+    _ensure_analysis_table()
+
+    job_upload = JobUpload(
+        company_name=company_name,
+        title=cleaned_title,
+        level=_clean_db_string(job_context.job_level, 50, blank_if_too_long=True),
+        employment_type=employment_type,
+        experience=experience_label,
+        application_deadline=_parse_optional_date(ai_job.get("application_deadline")),
+        location=_clean_db_string(job_context.job_location, 255),
+        salary_min=salary_min,
+        salary_max=salary_max,
+        currency=currency,
+        description_raw=jd_text,
+        description_clean=description_clean,
+        role_responsibilities=parsed_sections.get("role_responsibilities")
+        or _section_or_none(ai_job.get("role_responsibilities"), jd_text),
+        skills_qualifications=parsed_sections.get("skills_qualifications")
+        or _section_or_none(ai_job.get("skills_qualifications"), jd_text),
+        benefits=parsed_sections.get("benefits")
+        or _section_or_none(ai_job.get("benefits"), jd_text),
+        source_url=source_url,
+        source_site="upload",
+        status="uploaded",
+        source_filename=source_filename,
+        content_excerpt=(jd_text[:1200] if jd_text else None),
+        job_context_json=job_context.model_dump(mode="json"),
+        job_level=_clean_db_string(job_context.job_level, 50, blank_if_too_long=True),
+        job_years_required=job_context.job_years_required,
+        job_location=_clean_db_string(job_context.job_location, 255),
+        job_is_remote=job_context.job_is_remote,
+    )
+    try:
+        db.add(job_upload)
+        db.flush()
+
+        analysis_result = CvAnalysisResult(
+            job_job_id=None,
+            job_upload_id=job_upload.job_upload_id,
+            cv_filename=cv_filename,
+            cv_text_excerpt=(cv_text[:1200] if cv_text else None),
+            extracted_profile_json=extracted.model_dump(mode="json"),
+            job_context_json=job_context.model_dump(mode="json"),
+            job_match_json=match_result.model_dump(mode="json"),
+            gap_analysis_json=gap_result.model_dump(mode="json"),
+            roadmap_json=roadmap_result.model_dump(mode="json"),
+            ai_review_json=ai_review,
+        )
+        db.add(analysis_result)
+        db.commit()
+        db.refresh(analysis_result)
+
+        _persist_analysis_details(
+            db=db,
+            analysis_id=analysis_result.analysis_id,
+            extracted=extracted,
+            gap_result=gap_result,
+        )
+    except SQLAlchemyError as exc:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Failed to save uploaded job analysis: {exc}") from exc
+
     return CvIngestResponse(
-        analysis_result_id=None,
+        analysis_result_id=analysis_result.analysis_id,
         extracted_profile=extracted,
         job_context=job_context,
         job_match=match_result,
@@ -669,7 +924,7 @@ async def ingest_cv_file(
 async def scan_cv_with_uploaded_jd(
     cv_file: UploadFile = File(default=None, description="Resume file: PDF, DOCX, TXT, or MD"),
     jd_file: UploadFile = File(default=None, description="Single JD file: PDF, DOCX, TXT, MD, PNG, JPG, or WebP"),
-    jd_files: list[UploadFile] = File(default=None, description="Multiple JD files/images. Send repeated jd_files parts"),
+    jd_files: list[UploadFile | str] = File(default=None, description="Multiple JD files/images. Send repeated jd_files parts"),
     cv_text: str | None = Form(default=None),
     jd_text: str | None = Form(default=None),
     timeframe_weeks: int = Form(default=0),
@@ -679,7 +934,11 @@ async def scan_cv_with_uploaded_jd(
     if not cv_file and not (cv_text and cv_text.strip()):
         raise HTTPException(status_code=400, detail="Provide cv_file or cv_text")
 
-    uploaded_jd_files = [item for item in (jd_files or []) if item and item.filename]
+    uploaded_jd_files = [
+        item
+        for item in (jd_files or [])
+        if isinstance(item, UploadFile) and item.filename
+    ]
     if jd_file and jd_file.filename:
         uploaded_jd_files.insert(0, jd_file)
 
@@ -727,6 +986,7 @@ async def scan_cv_with_uploaded_jd(
         timeframe_weeks=timeframe_weeks,
         max_skills_per_phase=max_skills_per_phase,
         jd_filename=jd_filename,
+        cv_filename=(cv_file.filename if cv_file else None),
     )
 
 
@@ -747,9 +1007,16 @@ def list_analysis_results(
     items = [
         AnalysisHistoryItem(
             analysis_id=row.analysis_id,
-            cv_id=None,
             job_id=row.job_job_id,
-            job_title=row.job.title if row.job else "Unknown job",
+            job_upload_id=row.job_upload_id,
+            job_source="uploaded" if row.job_upload_id else "crawled",
+            job_title=(
+                row.job.title
+                if row.job
+                else row.job_upload.title
+                if row.job_upload
+                else "Unknown job"
+            ),
             cv_filename=row.cv_filename,
             created_at=row.created_at,
             job_match_score=(row.job_match_json or {}).get("score"),
@@ -773,9 +1040,6 @@ def get_analysis_result(
     )
     if not row:
         raise HTTPException(status_code=404, detail="Analysis result not found")
-
-    if not row.job:
-        raise HTTPException(status_code=404, detail="Related job not found")
 
     return CvIngestResponse(
         analysis_result_id=row.analysis_id,

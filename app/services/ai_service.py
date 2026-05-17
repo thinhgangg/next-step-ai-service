@@ -167,28 +167,45 @@ class AIService:
 		candidate_text = ", ".join(skill_candidates[:400])
 
 		prompt = (
-			"Bạn là chuyên gia phân tích job description IT. "
-			"Hãy trích xuất thông tin job và chỉ trả về JSON hợp lệ, không thêm markdown. "
-			"Schema JSON:\n"
+			"You are parsing an uploaded job description only. "
+			"Do not use resume/CV information, candidate information, or assumptions. "
+			"Return valid JSON only, with no markdown and no text outside JSON.\n"
+			"JSON schema:\n"
 			"{\n"
 			'  "title": string,\n'
+			'  "company_name": string,\n'
 			'  "job_level": "intern|junior|mid|senior|lead",\n'
+			'  "employment_type": string,\n'
+			'  "experience": string,\n'
 			'  "job_years_required": number,\n'
 			'  "job_location": string,\n'
 			'  "job_is_remote": boolean,\n'
+			'  "salary_min": number|null,\n'
+			'  "salary_max": number|null,\n'
+			'  "currency": "VND|USD|null",\n'
+			'  "application_deadline": "YYYY-MM-DD|null",\n'
+			'  "role_responsibilities": string,\n'
+			'  "skills_qualifications": string,\n'
+			'  "benefits": string,\n'
 			'  "job_skills": [\n'
 			'    {"name": string, "importance": number(0..1), "required_proficiency": number(0..1)}\n'
 			"  ]\n"
 			"}\n"
-			"Yêu cầu:\n"
-			"- Chỉ chọn skill trong danh sách ứng viên nếu có thể.\n"
-			"- Không đưa role label như Full-stack Developer, Backend Developer thành skill.\n"
-			"- importance càng cao nếu skill là bắt buộc, xuất hiện trong requirement hoặc tiêu đề.\n"
-			"- required_proficiency phản ánh mức job yêu cầu: cơ bản 0.5, trung bình 0.65, cao 0.8.\n"
-			"- Không bịa thông tin; nếu không rõ thì để giá trị bảo thủ.\n"
-			"- Dùng tiếng Anh cho tên skill nếu có thể.\n\n"
-			f"Danh sách skill ứng viên: {candidate_text}\n\n"
-			f"JD text:\n{limited_text}"
+			"Rules:\n"
+			"- Extract only fields explicitly present in the JD text. Use empty string or null when unclear.\n"
+			"- Do not copy any resume/CV skill, education, project, candidate name, or candidate experience.\n"
+			"- company_name must be the hiring company only, not a person name.\n"
+			"- title must be the job title only, not a page title or long sentence.\n"
+			"- experience must be short, for example '2+ years'. If there is no explicit year requirement, use ''.\n"
+			"- employment_type must be one short label: Fulltime, Part-time, Contract, Internship, Remote, Hybrid, Freelance, or ''.\n"
+			"- salary_min/salary_max must be numeric only. Convert hourly/monthly values only if shown directly in the JD; otherwise null.\n"
+			"- role_responsibilities, skills_qualifications, benefits must be copied/summarized from matching JD sections only.\n"
+			"- job_skills must include real skills required by the JD. Do not include role labels, generic soft skills, company tools, or unrelated words.\n"
+			"- Prefer names from this allowed skill taxonomy when possible. If a required skill is outside the taxonomy but clearly present, include it.\n"
+			"- importance is high for must-have/required skills, medium for normal requirements, low for nice-to-have.\n"
+			"- required_proficiency: basic 0.5, intermediate 0.65, strong/expert 0.8.\n\n"
+			f"Allowed skill taxonomy: {candidate_text}\n\n"
+			f"Uploaded JD text:\n{limited_text}"
 		)
 
 		try:
