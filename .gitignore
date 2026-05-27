@@ -1,9 +1,11 @@
-# Python
+# Python cache
 __pycache__/
 *.py[cod]
 *$py.class
 *.so
 .Python
+
+# Build / package
 build/
 develop-eggs/
 dist/
@@ -27,8 +29,23 @@ MANIFEST
 venv/
 env/
 ENV/
+.venv/
 env.bak/
 venv.bak/
+
+# Environment variables
+.env
+.env.local
+.env.development
+.env.production
+.env.staging
+.env.test
+.env.*.local
+
+# Keep example env files
+!.env.example
+!.env.development.example
+!.env.production.example
 
 # IDE
 .vscode/
@@ -36,17 +53,11 @@ venv.bak/
 *.swp
 *.swo
 *~
-.DS_Store
 
 # Database
 *.db
 *.sqlite
 *.sqlite3
-
-# Environment variables
-.env
-.env.local
-.env.*.local
 
 # Logs
 *.log
