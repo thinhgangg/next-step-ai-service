@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import json
 import re
@@ -170,6 +170,8 @@ class AIService:
 			"You are parsing an uploaded job description only. "
 			"Do not use resume/CV information, candidate information, or assumptions. "
 			"Return valid JSON only, with no markdown and no text outside JSON.\n"
+			"Return JSON with English keys, but all user-facing text values must be in Vietnamese. "
+			"Keep technology names unchanged, for example React, Next.js, Docker, Python, SQL, Git, API, AI, ATS, CV, JD.\n"
 			"JSON schema:\n"
 			"{\n"
 			'  "title": string,\n'
@@ -193,6 +195,9 @@ class AIService:
 			"}\n"
 			"Rules:\n"
 			"- Extract only fields explicitly present in the JD text. Use empty string or null when unclear.\n"
+			"- Keep JSON keys, enum values, and technical field values exactly as defined in the schema.\n"
+			"- title, company_name, experience, job_location, role_responsibilities, skills_qualifications, and benefits must be natural Vietnamese when the source allows summarizing.\n"
+			"- Do not use English section headings such as Responsibilities, Requirements, Qualifications, or Benefits in returned text values.\n"
 			"- Do not copy any resume/CV skill, education, project, candidate name, or candidate experience.\n"
 			"- company_name must be the hiring company only, not a person name.\n"
 			"- title must be the job title only, not a page title or long sentence.\n"
@@ -262,6 +267,9 @@ class AIService:
 			'  "recommendations": [string],\n'
 			'  "verdict": "strong_match|potential_match|weak_match"\n'
 			"}\n"
+			"- Return JSON with English keys, but all user-facing text values must be in Vietnamese. Keep technology names unchanged.\n"
+			"- summary, strengths, concerns, and recommendations must be natural Vietnamese. Do not use English headings in returned content.\n"
+			"- Keep technology, framework, and programming language names unchanged, for example React, Next.js, Docker, Python, SQL, Git, API, AI, ATS, CV, JD.\n"
 			"Yêu cầu:\n"
 			"- Viết tiếng Việt, ngắn gọn, thực tế, không tâng bốc quá mức.\n"
 			"- Không bịa kỹ năng hoặc kinh nghiệm ngoài dữ liệu.\n"

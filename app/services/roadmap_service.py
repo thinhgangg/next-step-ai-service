@@ -198,7 +198,7 @@ class RoadmapService:
                 RoadmapPhase(
                     phase=phase_index,
                     duration_weeks=phase_duration,
-                    title=f"Phase {phase_index}",
+                    title=f"Giai đoạn {phase_index}",
                     skills=phase_skills,
                 )
             )

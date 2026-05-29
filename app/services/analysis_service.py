@@ -80,7 +80,7 @@ class AnalysisService:
                     MissingSkillGap(
                         skill=job_skill.name,
                         importance=label,
-                        reason=f"Required in JobSkill with importance {AnalysisService.normalize_importance(job_skill.importance):.2f}",
+                        reason=f"JD yêu cầu kỹ năng này với mức độ quan trọng {AnalysisService.normalize_importance(job_skill.importance):.2f}.",
                     )
                 )
                 continue
