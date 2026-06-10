@@ -28,6 +28,7 @@ from app.schemas.roadmap import (
 )
 from app.services.analysis_service import AnalysisService
 from app.services.ai_service import AIService
+from app.services.embedding_service import EmbeddingService
 from app.services.job_matching_service import JobMatchingService
 from app.services.learning_duration_service import LearningDurationService
 from app.services.pdf_processor import CvIngestService
@@ -37,6 +38,7 @@ from app.services.skill_normalization import normalize_skill_key
 router = APIRouter()
 
 _RELATION_FILE = Path(__file__).resolve().parents[3] / "data" / "skill_relation_groups.json"
+_RAG_TOP_K = 5
 
 
 def _infer_cv_title(cv_text: str) -> str | None:
@@ -62,6 +64,67 @@ def _estimate_ats_score(cv_text: str) -> float:
     if any(token in text for token in ["education", "học vấn"]):
         score += 0.2
     return min(1.0, score)
+
+
+def _build_rag_query(cv_text: str, job_context, gap_result) -> str:
+    parts: list[str] = []
+
+    if getattr(job_context, "title", None):
+        parts.append(f"Job title: {job_context.title}")
+    if getattr(job_context, "job_level", None):
+        parts.append(f"Level: {job_context.job_level}")
+    if getattr(job_context, "job_location", None):
+        parts.append(f"Location: {job_context.job_location}")
+
+    job_skills = [
+        getattr(item, "name", "")
+        for item in getattr(job_context, "job_skills", []) or []
+        if getattr(item, "name", "")
+    ]
+    if job_skills:
+        parts.append(f"Required skills: {', '.join(job_skills[:12])}")
+
+    missing_skills = [item.skill for item in getattr(gap_result.skillGap, "missing", [])[:12]]
+    if missing_skills:
+        parts.append(f"Missing skills: {', '.join(missing_skills)}")
+
+    weak_skills = [item.skill for item in getattr(gap_result.skillGap, "weak", [])[:12]]
+    if weak_skills:
+        parts.append(f"Weak skills: {', '.join(weak_skills)}")
+
+    cv_excerpt = (cv_text or "").strip().replace("\n", " ")
+    if cv_excerpt:
+        parts.append(f"CV excerpt: {cv_excerpt[:1000]}")
+
+    return " | ".join(part for part in parts if part.strip())
+
+
+def _format_retrieved_contexts(chunks) -> list[dict]:
+    formatted: list[dict] = []
+    for chunk in chunks or []:
+        content = str(chunk.get("content") or "").strip()
+        if not content:
+            continue
+        formatted.append(
+            {
+                "source_type": chunk.get("source_type"),
+                "source_id": chunk.get("source_id"),
+                "chunk_index": chunk.get("chunk_index"),
+                "similarity": chunk.get("similarity"),
+                "content": content[:800],
+                "metadata": chunk.get("metadata") or {},
+            }
+        )
+    return formatted
+
+
+def _safe_retrieve_contexts(db: Session, rag_query: str) -> list[dict]:
+    try:
+        return _format_retrieved_contexts(
+            EmbeddingService.retrieve_similar_chunks(db, rag_query, top_k=_RAG_TOP_K)
+        )
+    except Exception:
+        return []
 
 
 def _clean_optional_text(value) -> str | None:
@@ -684,6 +747,8 @@ def _run_analysis(
         resources=roadmap_resources,
     )
     roadmap_result = RoadmapService.generate(roadmap_request)
+    rag_query = _build_rag_query(cv_text, job_context, gap_result)
+    retrieved_contexts = _safe_retrieve_contexts(db, rag_query)
     ai_review = AIService.generate_cv_job_review(
         cv_text=cv_text,
         extracted_profile=extracted.model_dump(mode="json"),
@@ -691,6 +756,7 @@ def _run_analysis(
         job_match=match_result.model_dump(mode="json"),
         gap_analysis=gap_result.model_dump(mode="json"),
         roadmap=roadmap_result.model_dump(mode="json"),
+        retrieved_contexts=retrieved_contexts,
     ) or _fallback_cv_review(match_result, gap_result, roadmap_result)
 
     _ensure_analysis_table()
@@ -843,6 +909,8 @@ def _run_uploaded_jd_analysis(
         resources=roadmap_resources,
     )
     roadmap_result = RoadmapService.generate(roadmap_request)
+    rag_query = _build_rag_query(cv_text, job_context, gap_result)
+    retrieved_contexts = _safe_retrieve_contexts(db, rag_query)
     ai_review = AIService.generate_cv_job_review(
         cv_text=cv_text,
         extracted_profile=extracted.model_dump(mode="json"),
@@ -850,6 +918,7 @@ def _run_uploaded_jd_analysis(
         job_match=match_result.model_dump(mode="json"),
         gap_analysis=gap_result.model_dump(mode="json"),
         roadmap=roadmap_result.model_dump(mode="json"),
+        retrieved_contexts=retrieved_contexts,
     ) or _fallback_cv_review(match_result, gap_result, roadmap_result)
 
     _ensure_analysis_table()

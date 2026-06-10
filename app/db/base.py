@@ -5,6 +5,7 @@ from app.models.cv_skill import CvSkill
 from app.models.job import Job
 from app.models.job_upload import JobUpload
 from app.models.job_skill import JobSkill
+from app.models.knowledge_chunk import KnowledgeChunk
 from app.models.skill import Skill
 from app.models.skill_course import SkillCourse
 from app.models.skill_gap import SkillGap

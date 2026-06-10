@@ -1,16 +1,34 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import random
+from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Optional
+from pathlib import Path
+from typing import Any, Optional
 
 from google import genai
 from sqlalchemy import text
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload
 
 from app.core.config import settings
 from app.models.job import Job
+from app.models.knowledge_chunk import KnowledgeChunk
+from app.models.skill import Skill
+from app.models.skill_course import SkillCourse
+
+
+_SKILL_DURATION_FILE = Path(__file__).resolve().parents[1] / "data" / "skill_duration_baseline.json"
+
+
+@dataclass(slots=True)
+class KnowledgeChunkSpec:
+    source_type: str
+    source_id: str
+    chunk_index: int
+    content: str
+    metadata_json: dict[str, Any]
 
 
 class EmbeddingService:
@@ -97,13 +115,242 @@ class EmbeddingService:
         return "\n".join(part.strip() for part in parts if part and part.strip())
 
     @classmethod
+    def _build_skill_chunk_specs(cls, db: Session) -> list[KnowledgeChunkSpec]:
+        specs: list[KnowledgeChunkSpec] = []
+        skills = db.query(Skill).order_by(Skill.name.asc()).all()
+        for skill in skills:
+            aliases = list(skill.aliases or [])
+            content = "\n".join(
+                part
+                for part in [
+                    f"Skill: {skill.name}",
+                    f"Category: {skill.category or ''}".strip(),
+                    f"Aliases: {', '.join(aliases) if aliases else 'None'}",
+                    f"Status: {'active' if skill.is_active else 'inactive'}",
+                ]
+                if part and part.strip()
+            )
+            specs.append(
+                KnowledgeChunkSpec(
+                    source_type="skill",
+                    source_id=str(skill.skill_id),
+                    chunk_index=0,
+                    content=content,
+                    metadata_json={
+                        "name": skill.name,
+                        "category": skill.category,
+                        "aliases": aliases,
+                        "is_active": skill.is_active,
+                    },
+                )
+            )
+        return specs
+
+    @classmethod
+    def _build_skill_course_chunk_specs(cls, db: Session) -> list[KnowledgeChunkSpec]:
+        specs: list[KnowledgeChunkSpec] = []
+        courses = (
+            db.query(SkillCourse)
+            .options(joinedload(SkillCourse.skill))
+            .order_by(SkillCourse.id.asc())
+            .all()
+        )
+        for course in courses:
+            if not course.skill:
+                continue
+            content = "\n".join(
+                part
+                for part in [
+                    f"Skill: {course.skill.name}",
+                    f"Course: {course.title}",
+                    f"Platform: {course.platform or ''}".strip(),
+                    f"Level: {course.level or ''}".strip(),
+                    f"Duration: {course.duration or ''}".strip(),
+                    f"Duration hours: {course.duration_hours if course.duration_hours is not None else ''}",
+                    f"URL: {course.url or ''}".strip(),
+                ]
+                if part and part.strip()
+            )
+            specs.append(
+                KnowledgeChunkSpec(
+                    source_type="skill_course",
+                    source_id=str(course.id),
+                    chunk_index=0,
+                    content=content,
+                    metadata_json={
+                        "skill_name": course.skill.name,
+                        "title": course.title,
+                        "platform": course.platform,
+                        "level": course.level,
+                        "duration_hours": course.duration_hours,
+                    },
+                )
+            )
+        return specs
+
+    @classmethod
+    def _build_skill_duration_chunk_specs(cls) -> list[KnowledgeChunkSpec]:
+        if not _SKILL_DURATION_FILE.exists():
+            return []
+
+        try:
+            payload = json.loads(_SKILL_DURATION_FILE.read_text(encoding="utf-8"))
+        except Exception:
+            return []
+
+        skills = payload.get("skills") if isinstance(payload, dict) else []
+        if not isinstance(skills, list):
+            return []
+
+        specs: list[KnowledgeChunkSpec] = []
+        for item in skills:
+            if not isinstance(item, dict):
+                continue
+            skill_name = str(item.get("skill") or "").strip()
+            if not skill_name:
+                continue
+            aliases = item.get("aliases") if isinstance(item.get("aliases"), list) else []
+            baseline_hours = item.get("baseline_hours")
+            reference_range = item.get("reference_range_hours")
+            source_hint = str(item.get("source_hint") or "").strip()
+            content = "\n".join(
+                part
+                for part in [
+                    f"Skill: {skill_name}",
+                    f"Aliases: {', '.join(str(alias).strip() for alias in aliases if str(alias).strip()) or 'None'}",
+                    f"Baseline hours: {baseline_hours if baseline_hours is not None else ''}",
+                    (
+                        "Reference range hours: "
+                        + (
+                            f"{reference_range[0]}-{reference_range[1]}"
+                            if isinstance(reference_range, list) and len(reference_range) >= 2
+                            else ""
+                        )
+                    ).strip(),
+                    f"Source hint: {source_hint}".strip(),
+                ]
+                if part and part.strip()
+            )
+            specs.append(
+                KnowledgeChunkSpec(
+                    source_type="skill_baseline",
+                    source_id=skill_name.lower(),
+                    chunk_index=0,
+                    content=content,
+                    metadata_json={
+                        "skill": skill_name,
+                        "aliases": aliases,
+                        "baseline_hours": baseline_hours,
+                        "reference_range_hours": reference_range,
+                        "source_hint": source_hint,
+                    },
+                )
+            )
+        return specs
+
+    @classmethod
+    def build_knowledge_chunk_specs(cls, db: Session) -> list[KnowledgeChunkSpec]:
+        specs: list[KnowledgeChunkSpec] = []
+        specs.extend(cls._build_skill_chunk_specs(db))
+        specs.extend(cls._build_skill_course_chunk_specs(db))
+        specs.extend(cls._build_skill_duration_chunk_specs())
+        return specs
+
+    @classmethod
+    def rebuild_knowledge_chunks(cls, db: Session, model: Optional[str] = None) -> dict[str, Any]:
+        selected_model = model or cls.DEFAULT_MODEL
+        specs = cls.build_knowledge_chunk_specs(db)
+
+        db.query(KnowledgeChunk).delete(synchronize_session=False)
+        db.flush()
+
+        processed = 0
+        for spec in specs:
+            embedding_values = cls.embed_text(spec.content, selected_model)
+            db.add(
+                KnowledgeChunk(
+                    source_type=spec.source_type,
+                    source_id=spec.source_id,
+                    chunk_index=spec.chunk_index,
+                    content=spec.content,
+                    metadata_json=spec.metadata_json,
+                    embedding=embedding_values,
+                    created_at=datetime.now(timezone.utc),
+                )
+            )
+            processed += 1
+
+        db.commit()
+        return {
+            "total_chunks": len(specs),
+            "processed": processed,
+            "failed": 0,
+            "model": selected_model,
+            "dimension": cls.EMBEDDING_DIMENSION,
+        }
+
+    @classmethod
+    def retrieve_similar_chunks(
+        cls,
+        db: Session,
+        query: str,
+        top_k: int = 5,
+        model: Optional[str] = None,
+    ) -> list[dict[str, Any]]:
+        cleaned_query = (query or "").strip()
+        if not cleaned_query:
+            return []
+
+        selected_model = model or cls.DEFAULT_MODEL
+        query_embedding = cls.embed_text(cleaned_query, selected_model)
+        query_literal = "[" + ",".join(str(value) for value in query_embedding) + "]"
+
+        rows = db.execute(
+            text(
+                """
+                SELECT
+                    knowledge_chunk_id,
+                    source_type,
+                    source_id,
+                    chunk_index,
+                    content,
+                    metadata,
+                    (embedding <=> CAST(:query_embedding AS vector)) AS distance
+                FROM knowledge_chunks
+                ORDER BY embedding <=> CAST(:query_embedding AS vector)
+                LIMIT :top_k
+                """
+            ),
+            {"query_embedding": query_literal, "top_k": max(1, top_k)},
+        ).mappings().all()
+
+        results: list[dict[str, Any]] = []
+        for row in rows:
+            distance = float(row["distance"] or 0.0)
+            similarity = max(0.0, 1.0 - distance)
+            results.append(
+                {
+                    "knowledge_chunk_id": row["knowledge_chunk_id"],
+                    "source_type": row["source_type"],
+                    "source_id": row["source_id"],
+                    "chunk_index": row["chunk_index"],
+                    "content": row["content"],
+                    "metadata": row["metadata"] or {},
+                    "distance": round(distance, 6),
+                    "similarity": round(similarity, 6),
+                }
+            )
+
+        return results
+
+    @classmethod
     def sync_job_embeddings(
         cls,
         db: Session,
         limit: int = 20,
         only_missing: bool = True,
         model: Optional[str] = None,
-    ) -> dict:
+    ) -> dict[str, Any]:
         cls._ensure_embedding_table(db)
 
         selected_model = model or cls.DEFAULT_MODEL

@@ -5,6 +5,7 @@ from app.models.cv_skill import CvSkill
 from app.models.job import Currency, Job, JobLevel, JobStatus
 from app.models.job_upload import JobUpload
 from app.models.job_skill import JobSkill
+from app.models.knowledge_chunk import KnowledgeChunk
 from app.models.skill import Skill
 from app.models.skill_course import SkillCourse
 from app.models.skill_gap import SkillGap
@@ -21,6 +22,7 @@ __all__ = [
 	"JobUpload",
 	"JobSkill",
 	"JobStatus",
+	"KnowledgeChunk",
 	"Skill",
 	"SkillCourse",
 	"SkillGap",

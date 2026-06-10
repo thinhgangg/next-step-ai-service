@@ -239,6 +239,7 @@ class AIService:
 		job_match: dict[str, Any],
 		gap_analysis: dict[str, Any],
 		roadmap: dict[str, Any],
+		retrieved_contexts: list[dict[str, Any]] | None = None,
 	) -> dict[str, Any] | None:
 		if not settings.CV_AI_ENRICHMENT_ENABLED:
 			return None
@@ -253,6 +254,7 @@ class AIService:
 			"job_match": job_match,
 			"gap_analysis": gap_analysis,
 			"roadmap": roadmap,
+			"retrieved_contexts": retrieved_contexts or [],
 		}
 
 		prompt = (
@@ -274,8 +276,9 @@ class AIService:
 			"- Viết tiếng Việt, ngắn gọn, thực tế, không tâng bốc quá mức.\n"
 			"- Không bịa kỹ năng hoặc kinh nghiệm ngoài dữ liệu.\n"
 			"- Nhận xét nên liên hệ score, missing/weak skills, roadmap và thời gian học.\n"
+			"- Nếu có retrieved_contexts, hãy ưu tiên sử dụng chúng như nguồn tri thức bổ sung khi giải thích hoặc gợi ý.\n"
 			"- strengths, concerns, recommendations mỗi danh sách tối đa 4 ý.\n\n"
-			f"Dữ liệu phân tích:\n{json.dumps(payload, ensure_ascii=False)[:12000]}\n\n"
+			f"Dữ liệu phân tích:\n{json.dumps(payload, ensure_ascii=False)[:16000]}\n\n"
 			f"CV excerpt:\n{limited_cv}"
 		)
 
