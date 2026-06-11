@@ -7,6 +7,7 @@ from app.core.config import settings
 engine = create_engine(
     settings.DATABASE_URL, 
     pool_pre_ping=True,
+    pool_recycle=300,
     echo=False  # Đổi thành True nếu bạn muốn xem các câu lệnh SQL cào dữ liệu hiện dưới Terminal
 )
 

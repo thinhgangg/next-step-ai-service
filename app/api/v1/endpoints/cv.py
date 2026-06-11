@@ -1,9 +1,10 @@
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
-from sqlalchemy import desc, text
+from sqlalchemy import desc
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 from pathlib import Path
 from datetime import date, datetime, timezone
+from threading import Lock
 import json
 import re
 
@@ -39,6 +40,8 @@ router = APIRouter()
 
 _RELATION_FILE = Path(__file__).resolve().parents[3] / "data" / "skill_relation_groups.json"
 _RAG_TOP_K = 5
+_ANALYSIS_TABLES_READY = False
+_ANALYSIS_TABLES_LOCK = Lock()
 
 
 def _infer_cv_title(cv_text: str) -> str | None:
@@ -312,54 +315,32 @@ def _fallback_cv_review(match_result, gap_result, roadmap_result) -> dict:
 
 
 def _ensure_analysis_table() -> None:
-    Base.metadata.create_all(
-        bind=engine,
-        tables=[
-            CvAnalysisResult.__table__,
-            CvSkill.__table__,
-            JobUpload.__table__,
-            SkillGap.__table__,
-        ],
-    )
-    with engine.begin() as connection:
-        connection.execute(text("ALTER TABLE cv_analysis_results ADD COLUMN IF NOT EXISTS ai_review_json JSON"))
-        connection.execute(text("ALTER TABLE cv_analysis_results ADD COLUMN IF NOT EXISTS job_upload_id INTEGER"))
-        connection.execute(text("ALTER TABLE cv_analysis_results ADD COLUMN IF NOT EXISTS user_id INTEGER"))
-        connection.execute(text("ALTER TABLE cv_analysis_results ADD COLUMN IF NOT EXISTS cv_id INTEGER"))
-        connection.execute(text("ALTER TABLE cv_analysis_results ALTER COLUMN job_job_id DROP NOT NULL"))
-        connection.execute(text("ALTER TABLE job_uploads ADD COLUMN IF NOT EXISTS company_name VARCHAR(255)"))
-        connection.execute(text("ALTER TABLE job_uploads ADD COLUMN IF NOT EXISTS title VARCHAR(255)"))
-        connection.execute(text("ALTER TABLE job_uploads ADD COLUMN IF NOT EXISTS level VARCHAR(50)"))
-        connection.execute(text("ALTER TABLE job_uploads ADD COLUMN IF NOT EXISTS employment_type VARCHAR(50)"))
-        connection.execute(text("ALTER TABLE job_uploads ADD COLUMN IF NOT EXISTS experience VARCHAR(50)"))
-        connection.execute(text("ALTER TABLE job_uploads ADD COLUMN IF NOT EXISTS application_deadline DATE"))
-        connection.execute(text("ALTER TABLE job_uploads ADD COLUMN IF NOT EXISTS location VARCHAR(255)"))
-        connection.execute(text("ALTER TABLE job_uploads ADD COLUMN IF NOT EXISTS salary_min INTEGER"))
-        connection.execute(text("ALTER TABLE job_uploads ADD COLUMN IF NOT EXISTS salary_max INTEGER"))
-        connection.execute(text("ALTER TABLE job_uploads ADD COLUMN IF NOT EXISTS currency VARCHAR(10)"))
-        connection.execute(text("ALTER TABLE job_uploads ADD COLUMN IF NOT EXISTS description_raw TEXT"))
-        connection.execute(text("ALTER TABLE job_uploads ADD COLUMN IF NOT EXISTS description_clean TEXT"))
-        connection.execute(text("ALTER TABLE job_uploads ADD COLUMN IF NOT EXISTS role_responsibilities TEXT"))
-        connection.execute(text("ALTER TABLE job_uploads ADD COLUMN IF NOT EXISTS skills_qualifications TEXT"))
-        connection.execute(text("ALTER TABLE job_uploads ADD COLUMN IF NOT EXISTS benefits TEXT"))
-        connection.execute(text("ALTER TABLE job_uploads ADD COLUMN IF NOT EXISTS source_url VARCHAR(1000)"))
-        connection.execute(text("ALTER TABLE job_uploads ADD COLUMN IF NOT EXISTS source_site VARCHAR(100)"))
-        connection.execute(text("ALTER TABLE job_uploads ADD COLUMN IF NOT EXISTS source_filename VARCHAR(1000)"))
-        connection.execute(text("ALTER TABLE job_uploads ADD COLUMN IF NOT EXISTS content_excerpt TEXT"))
-        connection.execute(text("ALTER TABLE job_uploads ADD COLUMN IF NOT EXISTS job_context_json JSON"))
-        connection.execute(text("ALTER TABLE job_uploads ADD COLUMN IF NOT EXISTS job_level VARCHAR(50)"))
-        connection.execute(text("ALTER TABLE job_uploads ADD COLUMN IF NOT EXISTS job_years_required DOUBLE PRECISION"))
-        connection.execute(text("ALTER TABLE job_uploads ADD COLUMN IF NOT EXISTS job_location VARCHAR(255)"))
-        connection.execute(text("ALTER TABLE job_uploads ADD COLUMN IF NOT EXISTS job_is_remote BOOLEAN"))
-        connection.execute(text("ALTER TABLE job_uploads ADD COLUMN IF NOT EXISTS posted_at TIMESTAMP WITH TIME ZONE"))
-        connection.execute(text("ALTER TABLE job_uploads ADD COLUMN IF NOT EXISTS status VARCHAR(50)"))
-        connection.execute(text("ALTER TABLE job_uploads ADD COLUMN IF NOT EXISTS created_at TIMESTAMP WITH TIME ZONE"))
-        connection.execute(text("UPDATE job_uploads SET title = COALESCE(title, 'Uploaded JD')"))
-        connection.execute(text("UPDATE job_uploads SET description_raw = COALESCE(description_raw, content_excerpt, '')"))
-        connection.execute(text("UPDATE job_uploads SET source_site = COALESCE(source_site, 'upload')"))
-        connection.execute(text("UPDATE job_uploads SET status = COALESCE(status, 'uploaded')"))
-        connection.execute(text("UPDATE job_uploads SET job_is_remote = COALESCE(job_is_remote, FALSE)"))
-        connection.execute(text("UPDATE job_uploads SET created_at = COALESCE(created_at, NOW())"))
+    global _ANALYSIS_TABLES_READY
+    if _ANALYSIS_TABLES_READY:
+        return
+
+    with _ANALYSIS_TABLES_LOCK:
+        if _ANALYSIS_TABLES_READY:
+            return
+
+        try:
+            Base.metadata.create_all(
+                bind=engine,
+                tables=[
+                    CvAnalysisResult.__table__,
+                    CvSkill.__table__,
+                    JobUpload.__table__,
+                    SkillGap.__table__,
+                ],
+            )
+        except SQLAlchemyError as exc:
+            engine.dispose()
+            raise HTTPException(
+                status_code=503,
+                detail="Database schema is not ready. Run `alembic upgrade head` and retry.",
+            ) from exc
+
+        _ANALYSIS_TABLES_READY = True
 
 
 def _persist_uploaded_jd_job(
